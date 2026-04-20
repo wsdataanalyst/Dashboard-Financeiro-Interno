@@ -1,12 +1,13 @@
 """
 Dashboard Financeiro e Resultados - Sistema de Cobrança
-Versão 8.0 - SQLite local via st.connection (simples e rápido)
+Versão 8.1 - SQLite nativo (sem SQLAlchemy)
 """
 
 import streamlit as st
 import pandas as pd
 import hashlib
 import unicodedata
+import sqlite3
 from datetime import datetime, timedelta
 import plotly.express as px
 import os
@@ -36,18 +37,18 @@ STATUS_MAP = {
     'acordo_pendente': '⏰ Acordo Pendente'
 }
 
-# ---------- CONEXÃO COM SQLITE VIA STREAMLIT ----------
 DB_PATH = "cobranca.db"
 
+# ---------- CONEXÃO COM SQLITE NATIVO ----------
+@st.cache_resource
 def get_connection():
-    """Retorna a conexão nativa do Streamlit para SQLite."""
-    return st.connection("sqlite", type="sql", url=f"file:///{DB_PATH}")
+    """Retorna uma conexão sqlite3 (cacheada)."""
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-# ---------- CRIAÇÃO DAS TABELAS (EXECUTADA UMA VEZ) ----------
 def init_db():
-    conn = get_connection()
-    with conn.session as s:
-        s.execute('''
+    """Cria as tabelas se não existirem."""
+    with get_connection() as conn:
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS usuarios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT NOT NULL,
@@ -56,7 +57,7 @@ def init_db():
                 perfil TEXT NOT NULL
             )
         ''')
-        s.execute('''
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS clientes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 codigo_cliente TEXT NOT NULL,
@@ -84,7 +85,7 @@ def init_db():
                 UNIQUE(codigo_cliente, numero_titulo)
             )
         ''')
-        s.execute('''
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS historico_tratativas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cliente_id INTEGER REFERENCES clientes(id),
@@ -96,7 +97,7 @@ def init_db():
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        s.execute('''
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS solicitacoes_reabertura (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cliente_id INTEGER NOT NULL REFERENCES clientes(id),
@@ -108,33 +109,33 @@ def init_db():
                 admin_responsavel TEXT
             )
         ''')
-        s.commit()
+        conn.commit()
 
-# ---------- CRIAÇÃO DOS USUÁRIOS PADRÃO ----------
 def criar_usuarios_iniciais():
-    conn = get_connection()
+    """Insere os três usuários padrão se não existirem."""
     usuarios = [
         ("Edvanison Muniz", "edvanison@empresa.com", "admin123", "admin"),
         ("Jane Xavier", "jane@empresa.com", "jane123", "assistente"),
         ("Renata Kelly", "renata@empresa.com", "renata123", "assistente")
     ]
-    for nome, email, senha, perfil in usuarios:
-        senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-        existing = conn.query(f"SELECT id FROM usuarios WHERE email = '{email}'", ttl=0)
-        if existing.empty:
-            conn.query(f"""
-                INSERT INTO usuarios (nome, email, senha_hash, perfil)
-                VALUES ('{nome}', '{email}', '{senha_hash}', '{perfil}')
-            """, ttl=0)
+    with get_connection() as conn:
+        for nome, email, senha, perfil in usuarios:
+            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
+            cur = conn.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
+            if cur.fetchone() is None:
+                conn.execute(
+                    "INSERT INTO usuarios (nome, email, senha_hash, perfil) VALUES (?, ?, ?, ?)",
+                    (nome, email, senha_hash, perfil)
+                )
+        conn.commit()
 
-# ---------- AUTENTICAÇÃO ----------
 def verificar_login(email, senha):
     senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-    conn = get_connection()
-    df = conn.query(f"""
-        SELECT nome, perfil FROM usuarios
-        WHERE email = '{email}' AND senha_hash = '{senha_hash}'
-    """, ttl=0)
+    with get_connection() as conn:
+        df = pd.read_sql_query(
+            "SELECT nome, perfil FROM usuarios WHERE email = ? AND senha_hash = ?",
+            conn, params=(email, senha_hash)
+        )
     if not df.empty:
         return df.iloc[0]['nome'], df.iloc[0]['perfil']
     return None
@@ -225,45 +226,42 @@ def processar_upload_excel(arquivo, modo="atualizar"):
         lambda x: 'Jane Xavier' if x <= 30 else 'Renata Kelly'
     )
 
-    conn = get_connection()
+    with get_connection() as conn:
+        if modo == "substituir":
+            conn.execute("DELETE FROM clientes")
+            conn.execute("DELETE FROM historico_tratativas")
+            conn.execute("DELETE FROM solicitacoes_reabertura")
+            conn.commit()
+            st.warning("Base antiga removida. Inserindo novos dados...")
 
-    if modo == "substituir":
-        with conn.session as s:
-            s.execute("DELETE FROM clientes")
-            s.execute("DELETE FROM historico_tratativas")
-            s.execute("DELETE FROM solicitacoes_reabertura")
-            s.commit()
-        st.warning("Base antiga removida. Inserindo novos dados...")
+        total = len(df)
+        progress = st.progress(0, f"Processando {total} registros...")
+        batch_size = 50
 
-    total = len(df)
-    progress = st.progress(0, f"Processando {total} registros...")
-    batch_size = 50
+        for i, (_, row) in enumerate(df.iterrows()):
+            codigo = str(row['Cliente']).strip()
+            titulo = str(row['No. Titulo']).strip()
+            if not codigo or not titulo:
+                continue
 
-    for i, (_, row) in enumerate(df.iterrows()):
-        codigo = str(row['Cliente']).strip()
-        titulo = str(row['No. Titulo']).strip()
-        if not codigo or not titulo:
-            continue
+            emissao_str = row['Emissao'].strftime('%Y-%m-%d') if hasattr(row['Emissao'], 'strftime') else str(row['Emissao'])
+            vencimento_str = row['Vencimento'].strftime('%Y-%m-%d') if hasattr(row['Vencimento'], 'strftime') else str(row['Vencimento'])
 
-        emissao_str = row['Emissao'].strftime('%Y-%m-%d') if hasattr(row['Emissao'], 'strftime') else str(row['Emissao'])
-        vencimento_str = row['Vencimento'].strftime('%Y-%m-%d') if hasattr(row['Vencimento'], 'strftime') else str(row['Vencimento'])
+            valor_original = float(row['Vlr.Titulo'])
+            juros = float(row['Valor Juros'])
+            valor_atualizado = float(row['Vlr a pagar'])
+            tempo_atraso = int(row['Atraso(D)'])
 
-        valor_original = float(row['Vlr.Titulo'])
-        juros = float(row['Valor Juros'])
-        valor_atualizado = float(row['Vlr a pagar'])
-        tempo_atraso = int(row['Atraso(D)'])
+            razao = str(row['Nome Cliente'])
+            vendedor = str(row['Vendedor'])
+            situacao = str(row['SITUACAO'])
+            hist_contato = str(row.get('Observações', '')) if pd.notna(row.get('Observações', '')) else ''
+            canal = str(row.get('CANAL', '')) if pd.notna(row.get('CANAL', '')) else ''
+            parcela = str(row['Parcela']).strip()
+            tipo_fat = str(row['Tipo'])
+            assistente = row['assistente_responsavel']
 
-        razao = str(row['Nome Cliente']).replace("'", "''")
-        vendedor = str(row['Vendedor']).replace("'", "''")
-        situacao = str(row['SITUACAO']).replace("'", "''")
-        hist_contato = str(row.get('Observações', '')).replace("'", "''") if pd.notna(row.get('Observações', '')) else ''
-        canal = str(row.get('CANAL', '')).replace("'", "''") if pd.notna(row.get('CANAL', '')) else ''
-        parcela = str(row['Parcela']).strip()
-        tipo_fat = str(row['Tipo']).replace("'", "''")
-        assistente = row['assistente_responsavel']
-
-        with conn.session as s:
-            s.execute('''
+            conn.execute('''
                 INSERT INTO clientes (
                     codigo_cliente, numero_titulo, razao_social, valor_original, juros, valor_atualizado,
                     tempo_atraso, emissao, vencimento, parcela, tipo_faturamento, vendedor, situacao,
@@ -290,35 +288,45 @@ def processar_upload_excel(arquivo, modo="atualizar"):
                 tempo_atraso, emissao_str, vencimento_str, parcela, tipo_fat, vendedor, situacao,
                 hist_contato, canal, assistente
             ))
-        if i % batch_size == 0:
-            progress.progress((i+1)/total)
-    progress.empty()
-    st.success(f"Upload concluído! {total} registros processados.")
-    st.cache_data.clear()
-    return df
+
+            if i % batch_size == 0:
+                conn.commit()
+                progress.progress((i+1)/total)
+
+        conn.commit()
+        progress.empty()
+        st.success(f"Upload concluído! {total} registros processados.")
+        st.cache_data.clear()
+        return df
 
 # ---------- ATUALIZAR STATUS ----------
 def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, data_pagamento=None, valor_acordo=None):
     try:
-        conn = get_connection()
-        df_ant = conn.query(f"SELECT status_tratativa FROM clientes WHERE id = {cliente_id}", ttl=0)
-        if df_ant.empty:
-            return False
-        status_anterior = df_ant.iloc[0]['status_tratativa']
+        with get_connection() as conn:
+            cur = conn.execute("SELECT status_tratativa FROM clientes WHERE id = ?", (cliente_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            status_anterior = row[0]
 
-        set_parts = [f"status_tratativa = '{novo_status}'", f"observacao = '{observacao}'", "data_ultima_atualizacao = CURRENT_TIMESTAMP"]
-        if data_pagamento:
-            set_parts.append(f"data_pagamento_programado = '{data_pagamento}'")
-        if valor_acordo is not None:
-            set_parts.append(f"valor_acordo = {valor_acordo}")
+            set_parts = ["status_tratativa = ?", "observacao = ?", "data_ultima_atualizacao = CURRENT_TIMESTAMP"]
+            params = [novo_status, observacao]
+            if data_pagamento:
+                set_parts.append("data_pagamento_programado = ?")
+                params.append(data_pagamento)
+            if valor_acordo is not None:
+                set_parts.append("valor_acordo = ?")
+                params.append(valor_acordo)
+            params.append(cliente_id)
 
-        with conn.session as s:
-            s.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id = {cliente_id}")
-            s.execute(f"""
+            conn.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id = ?", params)
+
+            conn.execute('''
                 INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
-                VALUES ({cliente_id}, '{assistente}', 'atualizacao_status', '{status_anterior}', '{novo_status}', '{observacao}')
-            """)
-            s.commit()
+                VALUES (?, ?, 'atualizacao_status', ?, ?, ?)
+            ''', (cliente_id, assistente, status_anterior, novo_status, observacao))
+
+            conn.commit()
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -328,20 +336,24 @@ def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, da
 # ---------- CARREGAR CLIENTES ----------
 @st.cache_data(ttl=600)
 def carregar_clientes_assistente_cached(nome):
-    conn = get_connection()
-    return conn.query(f"SELECT * FROM clientes WHERE assistente_responsavel = '{nome}'", ttl=600)
+    with get_connection() as conn:
+        df = pd.read_sql_query(
+            "SELECT * FROM clientes WHERE assistente_responsavel = ?",
+            conn, params=(nome,)
+        )
+    return df
 
 def carregar_clientes_assistente(nome):
     return carregar_clientes_assistente_cached(nome)
 
 def obter_proximo_cliente_pendente(assistente):
-    conn = get_connection()
-    df = conn.query(f"""
-        SELECT * FROM clientes
-        WHERE assistente_responsavel = '{assistente}' AND status_tratativa = 'pendente'
-        ORDER BY tempo_atraso DESC, valor_atualizado DESC
-        LIMIT 1
-    """, ttl=0)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT * FROM clientes
+            WHERE assistente_responsavel = ? AND status_tratativa = 'pendente'
+            ORDER BY tempo_atraso DESC, valor_atualizado DESC
+            LIMIT 1
+        ''', conn, params=(assistente,))
     if df.empty:
         return None
     return df.iloc[0]
@@ -349,121 +361,129 @@ def obter_proximo_cliente_pendente(assistente):
 # ---------- DASHBOARD AGREGADO ----------
 @st.cache_data(ttl=300)
 def get_dashboard_data():
-    conn = get_connection()
-    metricas = conn.query("""
-        SELECT
-            COUNT(*) as total_titulos,
-            COALESCE(SUM(valor_atualizado), 0) as valor_total,
-            COALESCE(SUM(CASE WHEN tempo_atraso > 0 THEN valor_atualizado ELSE 0 END), 0) as valor_inadimplente
-        FROM clientes
-    """, ttl=300).iloc[0]
-    return metricas
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT
+                COUNT(*) as total_titulos,
+                COALESCE(SUM(valor_atualizado), 0) as valor_total,
+                COALESCE(SUM(CASE WHEN tempo_atraso > 0 THEN valor_atualizado ELSE 0 END), 0) as valor_inadimplente
+            FROM clientes
+        ''', conn)
+    return df.iloc[0]
 
 @st.cache_data(ttl=300)
 def get_status_counts():
-    conn = get_connection()
-    return conn.query("""
-        SELECT status_tratativa, COUNT(*) as qtd, COALESCE(SUM(valor_atualizado), 0) as total
-        FROM clientes
-        GROUP BY status_tratativa
-    """, ttl=300)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT status_tratativa, COUNT(*) as qtd, COALESCE(SUM(valor_atualizado), 0) as total
+            FROM clientes
+            GROUP BY status_tratativa
+        ''', conn)
+    return df
 
 @st.cache_data(ttl=300)
 def get_assistente_comparativo():
-    conn = get_connection()
-    return conn.query("""
-        SELECT
-            assistente_responsavel,
-            COALESCE(SUM(valor_atualizado), 0) as valor_total,
-            COUNT(CASE WHEN tempo_atraso > 0 THEN 1 END) as clientes_em_atraso,
-            COUNT(*) as clientes_total
-        FROM clientes
-        GROUP BY assistente_responsavel
-    """, ttl=300)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT
+                assistente_responsavel,
+                COALESCE(SUM(valor_atualizado), 0) as valor_total,
+                COUNT(CASE WHEN tempo_atraso > 0 THEN 1 END) as clientes_em_atraso,
+                COUNT(*) as clientes_total
+            FROM clientes
+            GROUP BY assistente_responsavel
+        ''', conn)
+    return df
 
 @st.cache_data(ttl=300)
 def get_acordos_ontem():
     ontem = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    conn = get_connection()
-    df = conn.query(f"""
-        SELECT COUNT(*) as qtd, COALESCE(SUM(valor_acordo), 0) as total
-        FROM clientes
-        WHERE status_tratativa IN ('acordo_finalizado', 'acordo_pendente')
-          AND DATE(data_ultima_atualizacao) = '{ontem}'
-    """, ttl=300)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT COUNT(*) as qtd, COALESCE(SUM(valor_acordo), 0) as total
+            FROM clientes
+            WHERE status_tratativa IN ('acordo_finalizado', 'acordo_pendente')
+              AND DATE(data_ultima_atualizacao) = ?
+        ''', conn, params=(ontem,))
+    if df.empty:
+        return 0, 0.0
     return int(df.iloc[0]['qtd']), float(df.iloc[0]['total'])
 
 @st.cache_data(ttl=300)
 def get_acordos_hoje():
     hoje = datetime.now().strftime('%Y-%m-%d')
-    conn = get_connection()
-    df = conn.query(f"""
-        SELECT COUNT(*) as qtd, COALESCE(SUM(valor_acordo), 0) as total
-        FROM clientes
-        WHERE data_pagamento_programado = '{hoje}'
-    """, ttl=300)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT COUNT(*) as qtd, COALESCE(SUM(valor_acordo), 0) as total
+            FROM clientes
+            WHERE data_pagamento_programado = ?
+        ''', conn, params=(hoje,))
+    if df.empty:
+        return 0, 0.0
     return int(df.iloc[0]['qtd']), float(df.iloc[0]['total'])
 
 @st.cache_data(ttl=300)
 def get_acordos_futuros():
     hoje = datetime.now().strftime('%Y-%m-%d')
-    conn = get_connection()
-    df = conn.query(f"""
-        SELECT COUNT(*) as qtd, COALESCE(SUM(valor_acordo), 0) as total
-        FROM clientes
-        WHERE data_pagamento_programado > '{hoje}'
-    """, ttl=300)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT COUNT(*) as qtd, COALESCE(SUM(valor_acordo), 0) as total
+            FROM clientes
+            WHERE data_pagamento_programado > ?
+        ''', conn, params=(hoje,))
+    if df.empty:
+        return 0, 0.0
     return int(df.iloc[0]['qtd']), float(df.iloc[0]['total'])
 
 # ---------- DEMAIS FUNÇÕES ----------
 def criar_solicitacao_reabertura(cliente_id, assistente, motivo):
-    conn = get_connection()
-    with conn.session as s:
-        s.execute(f"""
+    with get_connection() as conn:
+        conn.execute('''
             INSERT INTO solicitacoes_reabertura (cliente_id, assistente, motivo, status)
-            VALUES ({cliente_id}, '{assistente}', '{motivo}', 'pendente')
-        """)
-        s.commit()
+            VALUES (?, ?, ?, 'pendente')
+        ''', (cliente_id, assistente, motivo))
+        conn.commit()
 
 def listar_solicitacoes_pendentes():
-    conn = get_connection()
-    return conn.query('''
-        SELECT s.id, s.cliente_id, c.codigo_cliente, c.razao_social, s.assistente, s.motivo, s.data_solicitacao
-        FROM solicitacoes_reabertura s
-        JOIN clientes c ON s.cliente_id = c.id
-        WHERE s.status = 'pendente'
-        ORDER BY s.data_solicitacao
-    ''', ttl=0)
+    with get_connection() as conn:
+        df = pd.read_sql_query('''
+            SELECT s.id, s.cliente_id, c.codigo_cliente, c.razao_social, s.assistente, s.motivo, s.data_solicitacao
+            FROM solicitacoes_reabertura s
+            JOIN clientes c ON s.cliente_id = c.id
+            WHERE s.status = 'pendente'
+            ORDER BY s.data_solicitacao
+        ''', conn)
+    return df
 
 def processar_solicitacao(solicitacao_id, aprovado, admin_nome):
-    conn = get_connection()
-    novo_status = 'aprovada' if aprovado else 'rejeitada'
-    with conn.session as s:
-        s.execute(f"""
+    with get_connection() as conn:
+        novo_status = 'aprovada' if aprovado else 'rejeitada'
+        conn.execute('''
             UPDATE solicitacoes_reabertura
-            SET status = '{novo_status}', data_resposta = CURRENT_TIMESTAMP, admin_responsavel = '{admin_nome}'
-            WHERE id = {solicitacao_id}
-        """)
+            SET status = ?, data_resposta = CURRENT_TIMESTAMP, admin_responsavel = ?
+            WHERE id = ?
+        ''', (novo_status, admin_nome, solicitacao_id))
+
         if aprovado:
-            df = conn.query(f"SELECT cliente_id FROM solicitacoes_reabertura WHERE id = {solicitacao_id}", ttl=0)
-            if not df.empty:
-                cliente_id = df.iloc[0]['cliente_id']
-                s.execute(f"UPDATE clientes SET status_tratativa = 'em_tratativa', data_ultima_atualizacao = CURRENT_TIMESTAMP WHERE id = {cliente_id}")
-                s.execute(f"""
+            cur = conn.execute("SELECT cliente_id FROM solicitacoes_reabertura WHERE id = ?", (solicitacao_id,))
+            row = cur.fetchone()
+            if row:
+                cliente_id = row[0]
+                conn.execute("UPDATE clientes SET status_tratativa = 'em_tratativa', data_ultima_atualizacao = CURRENT_TIMESTAMP WHERE id = ?", (cliente_id,))
+                conn.execute('''
                     INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
-                    VALUES ({cliente_id}, 'Sistema', 'reabertura_aprovada', 'acordo_finalizado', 'em_tratativa', 'Reabertura aprovada por {admin_nome}')
-                """)
-        s.commit()
+                    VALUES (?, 'Sistema', 'reabertura_aprovada', 'acordo_finalizado', 'em_tratativa', ?)
+                ''', (cliente_id, f"Reabertura aprovada por {admin_nome}"))
+        conn.commit()
     st.cache_data.clear()
 
 def transferir_cliente(codigo_cliente, nova_assistente):
-    conn = get_connection()
-    with conn.session as s:
-        s.execute(f"""
-            UPDATE clientes SET assistente_responsavel = '{nova_assistente}', data_ultima_atualizacao = CURRENT_TIMESTAMP
-            WHERE codigo_cliente = '{codigo_cliente}'
-        """)
-        s.commit()
+    with get_connection() as conn:
+        conn.execute('''
+            UPDATE clientes SET assistente_responsavel = ?, data_ultima_atualizacao = CURRENT_TIMESTAMP
+            WHERE codigo_cliente = ?
+        ''', (nova_assistente, codigo_cliente))
+        conn.commit()
     st.cache_data.clear()
     return True
 
@@ -581,13 +601,13 @@ if st.session_state.perfil == "admin":
             st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("🔴 Top 10 Inadimplentes")
-        conn = get_connection()
-        top_inad = conn.query("""
-            SELECT razao_social, valor_atualizado, tempo_atraso, assistente_responsavel
-            FROM clientes
-            ORDER BY valor_atualizado DESC
-            LIMIT 10
-        """, ttl=300)
+        with get_connection() as conn:
+            top_inad = pd.read_sql_query('''
+                SELECT razao_social, valor_atualizado, tempo_atraso, assistente_responsavel
+                FROM clientes
+                ORDER BY valor_atualizado DESC
+                LIMIT 10
+            ''', conn)
         st.dataframe(top_inad, use_container_width=True)
 
     elif menu == "🔄 Solicitações de Reabertura":
@@ -613,8 +633,8 @@ if st.session_state.perfil == "admin":
 
     elif menu == "📥 Exportar Dados":
         st.header("Exportar Base Completa")
-        conn = get_connection()
-        df_export = conn.query("SELECT * FROM clientes ORDER BY assistente_responsavel, status_tratativa", ttl=0)
+        with get_connection() as conn:
+            df_export = pd.read_sql_query("SELECT * FROM clientes ORDER BY assistente_responsavel, status_tratativa", conn)
         if df_export.empty:
             st.warning("Sem dados.")
         else:
@@ -642,8 +662,11 @@ else:
     codigo_manual = st.sidebar.text_input("Código do Cliente")
     if st.sidebar.button("Buscar"):
         if codigo_manual:
-            conn = get_connection()
-            df_manual = conn.query(f"SELECT * FROM clientes WHERE codigo_cliente = '{codigo_manual}'", ttl=0)
+            with get_connection() as conn:
+                df_manual = pd.read_sql_query(
+                    "SELECT * FROM clientes WHERE codigo_cliente = ?",
+                    conn, params=(codigo_manual,)
+                )
             if not df_manual.empty:
                 st.sidebar.success(f"Cliente: {df_manual.iloc[0]['razao_social']}")
                 st.session_state.cliente_selecionado = codigo_manual
@@ -780,4 +803,4 @@ else:
         st.dataframe(top5, use_container_width=True)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Dashboard Financeiro v8.0 - SQLite Local")
+st.sidebar.caption("Dashboard Financeiro v8.1 - SQLite Nativo")
