@@ -1,6 +1,6 @@
 """
 Dashboard Financeiro e Resultados - Sistema de Cobrança
-Versão 10.0 - Restauração dos cards clicáveis e fluxo de tratativa original
+Versão 11.1 - Flexibilidade na alteração de status + indicadores de clientes/boletos
 """
 
 import streamlit as st
@@ -26,7 +26,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-TAXA_JUROS_DIARIA = 0.00033
+TAXA_JUROS_DIARIO = 0.002       # 0,20% ao dia
+TAXA_JUROS_MENSAL = 0.06        # 6% ao mês
 
 STATUS_MAP = {
     'pendente': '⏳ Pendente',
@@ -38,7 +39,7 @@ STATUS_MAP = {
 
 DB_PATH = "cobranca.db"
 
-# ---------- CONEXÃO COM SQLITE NATIVO ----------
+# ---------- CONEXÃO COM SQLITE ----------
 @st.cache_resource
 def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -137,28 +138,24 @@ def verificar_login(email, senha):
     return None
 
 def processar_upload_excel(arquivo, modo="atualizar"):
+    # (mantido sem alterações)
     try:
         xl = pd.ExcelFile(arquivo)
         abas = xl.sheet_names
     except Exception as e:
         st.error(f"Erro ao ler o arquivo Excel: {e}")
         return None
-
     if not abas:
         st.error("A planilha não contém nenhuma aba.")
         return None
-
     aba_selecionada = st.selectbox("Selecione a aba da planilha:", abas)
     linha_cabecalho = st.number_input("Linha do cabeçalho (0 = primeira):", min_value=0, value=4, step=1)
-
     try:
         df = pd.read_excel(arquivo, sheet_name=aba_selecionada, header=linha_cabecalho)
     except Exception as e:
         st.error(f"Erro ao ler a aba '{aba_selecionada}': {e}")
         return None
-
     df = df.dropna(how='all')
-
     def normalizar_texto(texto):
         if not isinstance(texto, str):
             return ""
@@ -166,10 +163,8 @@ def processar_upload_excel(arquivo, modo="atualizar"):
         texto = texto.lower()
         texto = ' '.join(texto.split())
         return texto
-
     colunas_originais = df.columns.tolist()
     colunas_normalizadas = [normalizar_texto(col) for col in colunas_originais]
-
     mapa_esperado = {
         normalizar_texto('Nome Cliente'): 'Nome Cliente',
         normalizar_texto('Cliente'): 'Cliente',
@@ -190,17 +185,14 @@ def processar_upload_excel(arquivo, modo="atualizar"):
         normalizar_texto('CANAL'): 'CANAL',
         normalizar_texto('Observações'): 'Observações',
     }
-
     renomear = {}
     for i, col_norm in enumerate(colunas_normalizadas):
         if col_norm in mapa_esperado:
             renomear[colunas_originais[i]] = mapa_esperado[col_norm]
-
     if not renomear:
         st.error("Nenhuma coluna mapeada.")
         return None
     df.rename(columns=renomear, inplace=True)
-
     colunas_obrigatorias = [
         'Nome Cliente', 'Cliente', 'No. Titulo', 'Vlr.Titulo', 'SALDO',
         'Atraso(D)', 'Valor Juros', 'Vlr a pagar', 'Emissao', 'Vencimento',
@@ -210,17 +202,14 @@ def processar_upload_excel(arquivo, modo="atualizar"):
     if faltantes:
         st.error(f"Colunas obrigatórias ausentes: {', '.join(faltantes)}")
         return None
-
     for col in ['Vlr.Titulo', 'Vlr Baixado', 'SALDO', 'Valor Juros', 'Vlr a pagar']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     if 'Atraso(D)' in df.columns:
         df['Atraso(D)'] = pd.to_numeric(df['Atraso(D)'], errors='coerce').fillna(0).astype(int)
-
     df['assistente_responsavel'] = df['Atraso(D)'].apply(
         lambda x: 'Jane Xavier' if x <= 30 else 'Renata Kelly'
     )
-
     with get_connection() as conn:
         if modo == "substituir":
             conn.execute("DELETE FROM clientes")
@@ -228,25 +217,20 @@ def processar_upload_excel(arquivo, modo="atualizar"):
             conn.execute("DELETE FROM solicitacoes_reabertura")
             conn.commit()
             st.warning("Base antiga removida. Inserindo novos dados...")
-
         total = len(df)
         progress = st.progress(0, f"Processando {total} registros...")
         batch_size = 50
-
         for i, (_, row) in enumerate(df.iterrows()):
             codigo = str(row['Cliente']).strip()
             titulo = str(row['No. Titulo']).strip()
             if not codigo or not titulo:
                 continue
-
             emissao_str = row['Emissao'].strftime('%Y-%m-%d') if hasattr(row['Emissao'], 'strftime') else str(row['Emissao'])
             vencimento_str = row['Vencimento'].strftime('%Y-%m-%d') if hasattr(row['Vencimento'], 'strftime') else str(row['Vencimento'])
-
             valor_original = float(row['Vlr.Titulo'])
             juros = float(row['Valor Juros'])
             valor_atualizado = float(row['Vlr a pagar'])
             tempo_atraso = int(row['Atraso(D)'])
-
             razao = str(row['Nome Cliente'])
             vendedor = str(row['Vendedor'])
             situacao = str(row['SITUACAO'])
@@ -255,7 +239,6 @@ def processar_upload_excel(arquivo, modo="atualizar"):
             parcela = str(row['Parcela']).strip()
             tipo_fat = str(row['Tipo'])
             assistente = row['assistente_responsavel']
-
             conn.execute('''
                 INSERT INTO clientes (
                     codigo_cliente, numero_titulo, razao_social, valor_original, juros, valor_atualizado,
@@ -283,11 +266,9 @@ def processar_upload_excel(arquivo, modo="atualizar"):
                 tempo_atraso, emissao_str, vencimento_str, parcela, tipo_fat, vendedor, situacao,
                 hist_contato, canal, assistente
             ))
-
             if i % batch_size == 0:
                 conn.commit()
                 progress.progress((i+1)/total)
-
         conn.commit()
         progress.empty()
         st.success(f"Upload concluído! {total} registros processados.")
@@ -302,7 +283,6 @@ def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, da
             if not row:
                 return False
             status_anterior = row[0]
-
             set_parts = ["status_tratativa = ?", "observacao = ?", "data_ultima_atualizacao = CURRENT_TIMESTAMP"]
             params = [novo_status, observacao]
             if data_pagamento:
@@ -312,14 +292,11 @@ def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, da
                 set_parts.append("valor_acordo = ?")
                 params.append(valor_acordo)
             params.append(cliente_id)
-
             conn.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id = ?", params)
-
             conn.execute('''
                 INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
                 VALUES (?, ?, 'atualizacao_status', ?, ?, ?)
             ''', (cliente_id, assistente, status_anterior, novo_status, observacao))
-
             conn.commit()
         st.cache_data.clear()
         return True
@@ -339,7 +316,28 @@ def carregar_clientes_assistente_cached(nome):
 def carregar_clientes_assistente(nome):
     return carregar_clientes_assistente_cached(nome)
 
-# ---------- DASHBOARD AGREGADO (COM FILTRO DUPLO) ----------
+def calcular_juros_projetado(valor_original, data_vencimento, data_futura):
+    if data_vencimento is None or valor_original == 0:
+        return valor_original
+    try:
+        venc = datetime.strptime(data_vencimento, '%Y-%m-%d')
+        fut = datetime.strptime(data_futura, '%Y-%m-%d')
+        dias = (fut - venc).days
+        if dias <= 0:
+            return valor_original
+        if dias < 30:
+            return valor_original * (1 + TAXA_JUROS_DIARIO * dias)
+        else:
+            meses = dias // 30
+            resto_dias = dias % 30
+            valor_com_meses = valor_original * ((1 + TAXA_JUROS_MENSAL) ** meses)
+            if resto_dias > 0:
+                valor_com_meses *= (1 + TAXA_JUROS_DIARIO * resto_dias)
+            return valor_com_meses
+    except:
+        return valor_original
+
+# ---------- DASHBOARD AGREGADO ----------
 def aplicar_filtro_periodo(df, campo_data, data_inicio, data_fim):
     if data_inicio and data_fim and campo_data in df.columns:
         df[campo_data] = pd.to_datetime(df[campo_data], errors='coerce')
@@ -347,20 +345,25 @@ def aplicar_filtro_periodo(df, campo_data, data_inicio, data_fim):
         return df[mask]
     return df
 
+def is_inadimplente(row):
+    return row['tempo_atraso'] > 0 and row['status_tratativa'] != 'acordo_finalizado'
+
 @st.cache_data(ttl=300)
 def get_dashboard_data(data_inicio=None, data_fim=None, campo_filtro="vencimento"):
     with get_connection() as conn:
         df = pd.read_sql_query('''
-            SELECT valor_atualizado, tempo_atraso, vencimento, emissao FROM clientes
+            SELECT valor_atualizado, tempo_atraso, vencimento, emissao, status_tratativa FROM clientes
         ''', conn)
     df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
     total_titulos = len(df)
     valor_total = df['valor_atualizado'].sum()
-    valor_inadimplente = df[df['tempo_atraso'] > 0]['valor_atualizado'].sum()
+    df_inad = df[df.apply(is_inadimplente, axis=1)]
+    valor_inadimplente = df_inad['valor_atualizado'].sum()
     return pd.Series({
         'total_titulos': total_titulos,
         'valor_total': valor_total,
-        'valor_inadimplente': valor_inadimplente
+        'valor_inadimplente': valor_inadimplente,
+        'df_inad': df_inad
     })
 
 @st.cache_data(ttl=300)
@@ -379,12 +382,13 @@ def get_status_counts(data_inicio=None, data_fim=None, campo_filtro="vencimento"
 def get_assistente_comparativo(data_inicio=None, data_fim=None, campo_filtro="vencimento"):
     with get_connection() as conn:
         df = pd.read_sql_query('''
-            SELECT assistente_responsavel, valor_atualizado, tempo_atraso, vencimento, emissao FROM clientes
+            SELECT assistente_responsavel, valor_atualizado, tempo_atraso, vencimento, emissao, status_tratativa FROM clientes
         ''', conn)
     df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
+    df['inad'] = df.apply(is_inadimplente, axis=1)
     return df.groupby('assistente_responsavel').agg(
         valor_total=('valor_atualizado', 'sum'),
-        clientes_em_atraso=('tempo_atraso', lambda x: (x > 0).sum()),
+        clientes_em_atraso=('inad', 'sum'),
         clientes_total=('assistente_responsavel', 'count')
     ).reset_index()
 
@@ -455,7 +459,6 @@ def processar_solicitacao(solicitacao_id, aprovado, admin_nome):
             SET status = ?, data_resposta = CURRENT_TIMESTAMP, admin_responsavel = ?
             WHERE id = ?
         ''', (novo_status, admin_nome, solicitacao_id))
-
         if aprovado:
             cur = conn.execute("SELECT cliente_id FROM solicitacoes_reabertura WHERE id = ?", (solicitacao_id,))
             row = cur.fetchone()
@@ -478,17 +481,6 @@ def transferir_cliente(codigo_cliente, nova_assistente):
         conn.commit()
     st.cache_data.clear()
     return True
-
-def calcular_juros_projetado(valor_original, data_vencimento, data_futura):
-    if data_vencimento is None:
-        return valor_original
-    try:
-        venc = datetime.strptime(data_vencimento, '%Y-%m-%d')
-        fut = datetime.strptime(data_futura, '%Y-%m-%d')
-        dias = max(0, (fut - venc).days)
-        return valor_original * (1 + TAXA_JUROS_DIARIA * dias)
-    except:
-        return valor_original
 
 # ========== INICIALIZAÇÃO ==========
 init_db()
@@ -528,7 +520,6 @@ if st.sidebar.button("🚪 Sair"):
     st.session_state.perfil = None
     st.rerun()
 
-# Filtro global para dashboards
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Filtro de Período")
 usar_filtro = st.sidebar.checkbox("Ativar filtro")
@@ -613,7 +604,7 @@ if st.session_state.perfil == "admin":
         with get_connection() as conn:
             top_inad = pd.read_sql_query('''
                 SELECT razao_social, valor_atualizado, tempo_atraso, assistente_responsavel
-                FROM clientes
+                FROM clientes WHERE tempo_atraso > 0 AND status_tratativa != 'acordo_finalizado'
                 ORDER BY valor_atualizado DESC
                 LIMIT 10
             ''', conn)
@@ -667,7 +658,6 @@ if st.session_state.perfil == "admin":
 
 # ========== ASSISTENTE ==========
 else:
-    # Consulta manual na barra lateral
     st.sidebar.subheader("🔍 Consulta Manual")
     codigo_manual = st.sidebar.text_input("Código do Cliente")
     if st.sidebar.button("Buscar"):
@@ -692,11 +682,10 @@ else:
             st.info("Nenhum título atribuído.")
             st.stop()
 
-        # --- Cards de status clicáveis ---
+        # Cards de status
         st.subheader("📊 Status das Tratativas")
         status_list = list(STATUS_MAP.keys())
         cols = st.columns(len(status_list))
-
         if 'filtro_status' not in st.session_state:
             st.session_state.filtro_status = None
 
@@ -734,11 +723,9 @@ else:
         else:
             df_filtrado = df_clientes
 
-        # --- Lista de clientes filtrada ---
         st.subheader("📋 Lista de Clientes")
         if not df_filtrado.empty:
-            # Se veio de consulta manual e o código está no filtro, pré-selecionar
-            codigos = df_filtrado['codigo_cliente'].tolist()
+            codigos = df_filtrado['codigo_cliente'].unique().tolist()
             if 'cliente_selecionado' in st.session_state and st.session_state.cliente_selecionado in codigos:
                 default_idx = codigos.index(st.session_state.cliente_selecionado)
             else:
@@ -752,81 +739,98 @@ else:
             )
 
             if codigo_sel:
-                # Buscar o cliente fresco do banco
                 with get_connection() as conn:
-                    cliente_df = pd.read_sql_query(
+                    titulos_df = pd.read_sql_query(
                         "SELECT * FROM clientes WHERE codigo_cliente = ? AND assistente_responsavel = ?",
                         conn, params=(codigo_sel, st.session_state.usuario)
                     )
-                if cliente_df.empty:
+                if titulos_df.empty:
                     st.error("Cliente não encontrado.")
                 else:
-                    cliente = cliente_df.iloc[0]
-                    cliente_id = int(cliente['id'])
-                    status_atual = cliente['status_tratativa']
+                    cliente_nome = titulos_df.iloc[0]['razao_social']
+                    st.write(f"**{cliente_nome}** possui {len(titulos_df)} título(s).")
 
-                    with st.expander("📄 Detalhes do Cliente", expanded=True):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"**Código:** {cliente['codigo_cliente']}")
-                            st.write(f"**Razão:** {cliente['razao_social']}")
-                            st.write(f"**Valor Atualizado:** R$ {cliente['valor_atualizado']:,.2f}")
-                            st.write(f"**Atraso:** {cliente['tempo_atraso']} dias")
-                        with col2:
-                            st.write(f"**Vencimento:** {cliente['vencimento']}")
-                            st.write(f"**Vendedor:** {cliente['vendedor']}")
-                            st.write(f"**Status:** {STATUS_MAP.get(status_atual, status_atual)}")
-                            if cliente.get('data_pagamento_programado'):
-                                st.write(f"**Pagamento Programado:** {cliente['data_pagamento_programado']}")
+                    # Tabela editável com checkboxes
+                    titulos_df['Selecionar'] = False
+                    edited_df = st.data_editor(
+                        titulos_df[['Selecionar', 'numero_titulo', 'vencimento', 'valor_atualizado', 'status_tratativa', 'observacao']],
+                        column_config={"Selecionar": st.column_config.CheckboxColumn("Selecionar")},
+                        hide_index=True,
+                        use_container_width=True,
+                        key=f"editor_{codigo_sel}"
+                    )
+                    ids_selecionados = titulos_df[edited_df['Selecionar'] == True]['id'].tolist()
 
-                        # Ações conforme status
-                        if status_atual == 'pendente':
-                            if st.button("🔔 Pegar para Tratativa"):
-                                atualizar_status_cliente(cliente_id, 'em_tratativa', f"Pego por {st.session_state.usuario}", st.session_state.usuario)
-                                st.rerun()
-                        elif status_atual == 'em_tratativa':
-                            with st.form("form_tratativa"):
+                    if ids_selecionados:
+                        st.write(f"{len(ids_selecionados)} título(s) selecionado(s).")
+
+                        # Filtrar apenas títulos que não são acordo_finalizado para ação em lote
+                        ids_validos = [tid for tid in ids_selecionados if titulos_df[titulos_df['id']==tid]['status_tratativa'].iloc[0] != 'acordo_finalizado']
+                        if len(ids_validos) < len(ids_selecionados):
+                            st.warning("Alguns títulos com 'Acordo Finalizado' não serão alterados.")
+
+                        if ids_validos:
+                            with st.form("form_tratativa_lote"):
                                 novo_status = st.selectbox("Novo Status", options=list(STATUS_MAP.keys()), format_func=lambda x: STATUS_MAP[x])
                                 motivo = st.selectbox("Motivo (opcional)", ['', 'Vencimento fim de semana', 'Repasse de verba', 'Problemas financeiros', 'Erro de programação', 'Mudança de Pessoal', 'Contato não atende!'])
                                 obs = st.text_area("Observações")
                                 data_pag = st.date_input("Data de Pagamento Programado (opcional)", value=None, min_value=datetime.today())
                                 valor_acordo = None
                                 if data_pag:
-                                    valor_proj = calcular_juros_projetado(cliente['valor_original'], cliente['vencimento'], data_pag.strftime('%Y-%m-%d'))
-                                    st.write(f"💡 Valor projetado: R$ {valor_proj:,.2f}")
+                                    ex = titulos_df[titulos_df['id'] == ids_validos[0]].iloc[0]
+                                    valor_proj = calcular_juros_projetado(ex['valor_original'], ex['vencimento'], data_pag.strftime('%Y-%m-%d'))
+                                    st.write(f"💡 Valor projetado (exemplo): R$ {valor_proj:,.2f}")
                                     valor_acordo = st.number_input("Valor do Acordo (R$)", value=float(valor_proj), step=0.01)
-                                if st.form_submit_button("Registrar"):
+                                if st.form_submit_button("Aplicar aos selecionados"):
                                     obs_completa = f"{motivo}: {obs}" if motivo else obs
                                     data_str = data_pag.strftime('%Y-%m-%d') if data_pag else None
-                                    if atualizar_status_cliente(cliente_id, novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo):
-                                        st.success("Tratativa registrada!")
-                                        st.rerun()
-                        elif status_atual == 'acordo_finalizado':
-                            st.warning("Este cliente possui acordo finalizado. Para reabrir, solicite autorização do administrador.")
-                            with st.form("form_reabertura"):
-                                motivo_reab = st.text_area("Justificativa para reabertura")
-                                if st.form_submit_button("📩 Solicitar Reabertura"):
-                                    if motivo_reab.strip():
-                                        criar_solicitacao_reabertura(cliente_id, st.session_state.usuario, motivo_reab)
-                                        st.success("Solicitação enviada ao administrador.")
-                                        st.rerun()
-                                    else:
-                                        st.error("Descreva o motivo da reabertura.")
-                        else:
-                            # Para outros status, apenas visualização
-                            pass
+                                    for tid in ids_validos:
+                                        atualizar_status_cliente(tid, novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo)
+                                    st.success(f"{len(ids_validos)} título(s) atualizado(s)!")
+                                    st.rerun()
 
-                    # Histórico
-                    st.subheader("📜 Histórico")
-                    with get_connection() as conn:
-                        hist = pd.read_sql_query(
-                            "SELECT data_hora, assistente, status_anterior, status_novo, observacao FROM historico_tratativas WHERE cliente_id = ? ORDER BY data_hora DESC",
-                            conn, params=(cliente_id,)
-                        )
-                    if not hist.empty:
-                        st.dataframe(hist, use_container_width=True)
-                    else:
-                        st.info("Nenhum histórico registrado.")
+                    # Detalhes de título individual com possibilidade de alteração (exceto acordo_finalizado)
+                    with st.expander("🔎 Ver/Editar título específico"):
+                        titulo_det = st.selectbox("Número do título:", titulos_df['numero_titulo'].tolist())
+                        if titulo_det:
+                            titulo = titulos_df[titulos_df['numero_titulo'] == titulo_det].iloc[0]
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**Nº Título:** {titulo['numero_titulo']}")
+                                st.write(f"**Emissão:** {titulo['emissao']}")
+                                st.write(f"**Vencimento:** {titulo['vencimento']}")
+                                st.write(f"**Parcela:** {titulo['parcela']}")
+                                st.write(f"**Valor Original:** R$ {titulo['valor_original']:,.2f}")
+                            with col2:
+                                st.write(f"**Juros:** R$ {titulo['juros']:,.2f}")
+                                st.write(f"**Valor a Pagar:** R$ {titulo['valor_atualizado']:,.2f}")
+                                st.write(f"**Situação:** {titulo['situacao']}")
+                                st.write(f"**Canal:** {titulo['canal']}")
+                                st.write(f"**Status:** {STATUS_MAP.get(titulo['status_tratativa'], titulo['status_tratativa'])}")
+                                if titulo['data_pagamento_programado']:
+                                    st.write(f"**Pagamento Programado:** {titulo['data_pagamento_programado']}")
+
+                            status_atual = titulo['status_tratativa']
+                            if status_atual != 'acordo_finalizado':
+                                with st.form(f"form_edit_{titulo['id']}"):
+                                    novo_status = st.selectbox("Alterar para:", options=list(STATUS_MAP.keys()), format_func=lambda x: STATUS_MAP[x], key=f"status_{titulo['id']}")
+                                    motivo = st.selectbox("Motivo (opcional)", ['', 'Vencimento fim de semana', 'Repasse de verba', 'Problemas financeiros', 'Erro de programação', 'Mudança de Pessoal', 'Contato não atende!'], key=f"motivo_{titulo['id']}")
+                                    obs = st.text_area("Observações", key=f"obs_{titulo['id']}")
+                                    data_pag = st.date_input("Data de Pagamento Programado (opcional)", value=None, min_value=datetime.today(), key=f"data_{titulo['id']}")
+                                    valor_acordo = None
+                                    if data_pag:
+                                        valor_proj = calcular_juros_projetado(titulo['valor_original'], titulo['vencimento'], data_pag.strftime('%Y-%m-%d'))
+                                        st.write(f"💡 Valor projetado: R$ {valor_proj:,.2f}")
+                                        valor_acordo = st.number_input("Valor do Acordo (R$)", value=float(valor_proj), step=0.01, key=f"valor_{titulo['id']}")
+                                    if st.form_submit_button("Atualizar"):
+                                        obs_completa = f"{motivo}: {obs}" if motivo else obs
+                                        data_str = data_pag.strftime('%Y-%m-%d') if data_pag else None
+                                        if atualizar_status_cliente(titulo['id'], novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo):
+                                            st.success("Título atualizado!")
+                                            st.rerun()
+                            else:
+                                st.warning("Títulos com 'Acordo Finalizado' não podem ser alterados diretamente. Solicite reabertura se necessário.")
+
         else:
             st.info("Nenhum cliente com este status.")
 
@@ -837,19 +841,33 @@ else:
             st.info("Sem dados.")
             st.stop()
 
+        df_clientes_filtrado = aplicar_filtro_periodo(df_clientes.copy(), campo_db, data_inicio, data_fim)
+
         metricas_global = get_dashboard_data(data_inicio, data_fim, campo_db)
         total_global = float(metricas_global['valor_total'])
         inad_global = float(metricas_global['valor_inadimplente'])
         percent_global = (inad_global / total_global * 100) if total_global else 0
         st.metric("🌍 Inadimplência Global", f"{percent_global:.2f}%", delta="Meta ≤3%" if percent_global <=3 else "Acima da meta")
 
-        total_ind = df_clientes['valor_atualizado'].sum()
-        inad_ind = df_clientes[df_clientes['tempo_atraso'] > 0]['valor_atualizado'].sum()
+        total_ind = df_clientes_filtrado['valor_atualizado'].sum()
+        df_inad_ind = df_clientes_filtrado[df_clientes_filtrado.apply(is_inadimplente, axis=1)]
+        inad_ind = df_inad_ind['valor_atualizado'].sum()
         percent_ind = (inad_ind / total_ind * 100) if total_ind else 0
-        col1, col2, col3 = st.columns(3)
+        qtd_inad = len(df_inad_ind)
+
+        # NOVOS INDICADORES
+        clientes_unicos = df_clientes_filtrado['codigo_cliente'].nunique()
+        total_boletos = len(df_clientes_filtrado)
+
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Meu Valor Aberto", f"R$ {total_ind:,.2f}")
         col2.metric("Minha Inadimplência", f"{percent_ind:.2f}%")
-        col3.metric("Títulos em Atraso", len(df_clientes[df_clientes['tempo_atraso'] > 0]))
+        col3.metric("Clientes Únicos", clientes_unicos)
+        col4.metric("Total de Boletos", total_boletos)
+
+        qtd_hoje, val_hoje = get_acordos_hoje()
+        if qtd_hoje > 0:
+            st.warning(f"🔔 **Fique atento!** Você tem **{qtd_hoje}** acordo(s) programado(s) para hoje, totalizando **R$ {val_hoje:,.2f}**.")
 
         st.subheader("📅 Meus Acordos")
         col_a, col_b, col_c = st.columns(3)
@@ -858,17 +876,17 @@ else:
         hoje_str = hoje.strftime('%Y-%m-%d')
         ontem_str = ontem.strftime('%Y-%m-%d')
 
-        df_ass = df_clientes
+        df_ass = df_clientes_filtrado
         qtd_ontem = len(df_ass[(df_ass['status_tratativa'].isin(['acordo_finalizado', 'acordo_pendente'])) & (pd.to_datetime(df_ass['data_ultima_atualizacao']).dt.date == ontem)])
         val_ontem = df_ass[(df_ass['status_tratativa'].isin(['acordo_finalizado', 'acordo_pendente'])) & (pd.to_datetime(df_ass['data_ultima_atualizacao']).dt.date == ontem)]['valor_acordo'].sum()
         with col_a:
             st.metric("Acordos Fechados Ontem", f"{qtd_ontem} títulos", f"R$ {val_ontem:,.2f}")
 
         df_hoje = df_ass[df_ass['data_pagamento_programado'] == hoje_str]
-        qtd_hoje = len(df_hoje)
-        val_hoje = df_hoje['valor_acordo'].sum()
+        qtd_hoje_ass = len(df_hoje)
+        val_hoje_ass = df_hoje['valor_acordo'].sum()
         with col_b:
-            st.metric("Acordos Programados Hoje", f"{qtd_hoje} títulos", f"R$ {val_hoje:,.2f}")
+            st.metric("Acordos Programados Hoje", f"{qtd_hoje_ass} títulos", f"R$ {val_hoje_ass:,.2f}")
 
         df_fut = df_ass[df_ass['data_pagamento_programado'] > hoje_str]
         qtd_fut = len(df_fut)
@@ -876,12 +894,31 @@ else:
         with col_c:
             st.metric("Acordos Programados Futuros", f"{qtd_fut} títulos", f"R$ {val_fut:,.2f}")
 
+        # Forecast
+        df_pendentes = df_ass[df_ass['status_tratativa'] == 'acordo_pendente']
+        if not df_pendentes.empty:
+            valor_pendente = df_pendentes['valor_atualizado'].sum()
+            nova_inad = inad_ind - valor_pendente
+            nova_taxa = (nova_inad / total_ind * 100) if total_ind else 0
+            st.subheader("🔮 Projeção")
+            st.write(f"Se todos os **acordos pendentes** (R$ {valor_pendente:,.2f}) forem finalizados, sua inadimplência cairá para **{nova_taxa:.2f}%**.")
+
+        # Meta para 3%
+        if percent_ind > 3:
+            valor_necessario = inad_ind - (0.03 * total_ind)
+            st.subheader("🎯 Meta para 3%")
+            st.write(f"Para atingir **3%** de inadimplência, você precisa recuperar **R$ {valor_necessario:,.2f}** em títulos inadimplentes.")
+            if qtd_inad > 0:
+                valor_medio = inad_ind / qtd_inad
+                qtd_necessaria = int(valor_necessario / valor_medio) + 1
+                st.write(f"Isso equivale a aproximadamente **{qtd_necessaria}** títulos (valor médio R$ {valor_medio:,.2f}).")
+
         st.subheader("📊 Status das Minhas Tratativas")
         status_list = list(STATUS_MAP.keys())
         cols = st.columns(len(status_list))
         cores = {'pendente':'#6B7280','em_tratativa':'#2563EB','contatado_sem_exito':'#DC2626','acordo_finalizado':'#059669','acordo_pendente':'#D97706'}
         for i, status in enumerate(status_list):
-            df_status = df_clientes[df_clientes['status_tratativa'] == status]
+            df_status = df_ass[df_ass['status_tratativa'] == status]
             with cols[i]:
                 st.markdown(f"""
                 <div style="background-color:{cores[status]}; padding:15px; border-radius:15px; text-align:center;">
@@ -892,15 +929,15 @@ else:
                 """, unsafe_allow_html=True)
 
         st.subheader("Distribuição")
-        status_counts = df_clientes['status_tratativa'].value_counts().reset_index()
+        status_counts = df_ass['status_tratativa'].value_counts().reset_index()
         status_counts.columns = ['Status', 'Quantidade']
         status_counts['Status'] = status_counts['Status'].map(STATUS_MAP)
         fig = px.pie(status_counts, names='Status', values='Quantidade', hole=0.4)
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("🔴 Meus Top 5 Inadimplentes")
-        top5 = df_clientes.nlargest(5, 'valor_atualizado')[['razao_social', 'valor_atualizado', 'tempo_atraso']]
+        top5 = df_inad_ind.nlargest(5, 'valor_atualizado')[['razao_social', 'valor_atualizado', 'tempo_atraso']]
         st.dataframe(top5, use_container_width=True)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Dashboard Financeiro v10.0")
+st.sidebar.caption("Dashboard Financeiro v11.1")
