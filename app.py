@@ -1,6 +1,6 @@
 """
 Dashboard Financeiro e Resultados - Sistema de Cobrança
-Versão 11.1 - Flexibilidade na alteração de status + indicadores de clientes/boletos
+Versão 11.8 - Correção visual da página de login
 """
 
 import streamlit as st
@@ -8,26 +8,56 @@ import pandas as pd
 import hashlib
 import unicodedata
 import sqlite3
+import shutil
+import os
 from datetime import datetime, timedelta
 import plotly.express as px
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="Dashboard Financeiro", page_icon="💰", layout="wide")
 
+# CSS GLOBAL: fontes maiores e melhorias visuais
 st.markdown("""
 <style>
-    html, body, [class*="css"] { font-size: 18px; }
-    h1 { font-size: 2.5rem !important; }
-    h2 { font-size: 2rem !important; }
-    h3 { font-size: 1.6rem !important; }
-    [data-testid="stMetricValue"] { font-size: 2rem !important; }
-    [data-testid="stMetricLabel"] { font-size: 1.1rem !important; }
-    .stButton button { font-size: 1.1rem !important; padding: 0.5rem 1rem !important; }
+    html, body, [class*="css"] {
+        font-size: 20px;
+    }
+    h1 { font-size: 2.8rem !important; }
+    h2 { font-size: 2.2rem !important; }
+    h3 { font-size: 1.8rem !important; }
+    [data-testid="stMetricValue"] { font-size: 2.2rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 1.2rem !important; }
+    .stButton button { font-size: 1.2rem !important; padding: 0.6rem 1.2rem !important; }
+    .stTextInput > div > div > input { font-size: 1.2rem !important; }
+    .stSelectbox > div > div > div { font-size: 1.2rem !important; }
+    /* Estilo para badge de notificação */
+    .badge {
+        background-color: #dc2626;
+        color: white;
+        border-radius: 12px;
+        padding: 2px 8px;
+        margin-left: 8px;
+        font-size: 0.9rem;
+        font-weight: bold;
+    }
+    /* Centralizar login */
+    .login-container {
+        max-width: 400px;
+        margin: 0 auto;
+        padding: 40px 30px;
+        background-color: #f8fafc;
+        border-radius: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    /* Remove espaço extra acima do título no login */
+    .block-container {
+        padding-top: 2rem !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-TAXA_JUROS_DIARIO = 0.002       # 0,20% ao dia
-TAXA_JUROS_MENSAL = 0.06        # 6% ao mês
+TAXA_JUROS_DIARIO = 0.002
+TAXA_JUROS_MENSAL = 0.06
 
 STATUS_MAP = {
     'pendente': '⏳ Pendente',
@@ -38,6 +68,7 @@ STATUS_MAP = {
 }
 
 DB_PATH = "cobranca.db"
+BACKUP_DIR = "backups"
 
 # ---------- CONEXÃO COM SQLITE ----------
 @st.cache_resource
@@ -78,11 +109,17 @@ def init_db():
                 status_tratativa TEXT DEFAULT 'pendente',
                 observacao TEXT DEFAULT '',
                 data_pagamento_programado TEXT,
+                data_pagamento_realizado TEXT,
                 data_ultima_atualizacao TIMESTAMP,
                 data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(codigo_cliente, numero_titulo)
             )
         ''')
+        cur = conn.execute("PRAGMA table_info(clientes)")
+        colunas = [row[1] for row in cur.fetchall()]
+        if 'data_pagamento_realizado' not in colunas:
+            conn.execute("ALTER TABLE clientes ADD COLUMN data_pagamento_realizado TEXT")
+        
         conn.execute('''
             CREATE TABLE IF NOT EXISTS historico_tratativas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,8 +174,27 @@ def verificar_login(email, senha):
         return df.iloc[0]['nome'], df.iloc[0]['perfil']
     return None
 
+def create_backup():
+    if not os.path.exists(BACKUP_DIR):
+        os.makedirs(BACKUP_DIR)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(BACKUP_DIR, f"cobranca_backup_{timestamp}.db")
+    shutil.copy2(DB_PATH, backup_path)
+    return backup_path
+
+def restore_backup(uploaded_file):
+    try:
+        create_backup()
+        with open(DB_PATH, 'wb') as f:
+            f.write(uploaded_file.getbuffer())
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao restaurar backup: {e}")
+        return False
+
 def processar_upload_excel(arquivo, modo="atualizar"):
-    # (mantido sem alterações)
     try:
         xl = pd.ExcelFile(arquivo)
         abas = xl.sheet_names
@@ -212,6 +268,10 @@ def processar_upload_excel(arquivo, modo="atualizar"):
     )
     with get_connection() as conn:
         if modo == "substituir":
+            senha_admin = st.text_input("Digite a senha do administrador para confirmar a substituição total da base:", type="password")
+            if senha_admin != "admin123":
+                st.error("Senha incorreta. Operação cancelada.")
+                return None
             conn.execute("DELETE FROM clientes")
             conn.execute("DELETE FROM historico_tratativas")
             conn.execute("DELETE FROM solicitacoes_reabertura")
@@ -275,7 +335,7 @@ def processar_upload_excel(arquivo, modo="atualizar"):
         st.cache_data.clear()
         return df
 
-def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, data_pagamento=None, valor_acordo=None):
+def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, data_pagamento=None, valor_acordo=None, data_pagamento_realizado=None):
     try:
         with get_connection() as conn:
             cur = conn.execute("SELECT status_tratativa FROM clientes WHERE id = ?", (cliente_id,))
@@ -291,6 +351,9 @@ def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, da
             if valor_acordo is not None:
                 set_parts.append("valor_acordo = ?")
                 params.append(valor_acordo)
+            if data_pagamento_realizado:
+                set_parts.append("data_pagamento_realizado = ?")
+                params.append(data_pagamento_realizado)
             params.append(cliente_id)
             conn.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id = ?", params)
             conn.execute('''
@@ -337,7 +400,26 @@ def calcular_juros_projetado(valor_original, data_vencimento, data_futura):
     except:
         return valor_original
 
-# ---------- DASHBOARD AGREGADO ----------
+def get_date_range_from_selection(ano, mes):
+    if ano is None or ano == "Todos":
+        return None, None
+    if mes == "Todos":
+        data_inicio = datetime(ano, 1, 1)
+        data_fim = datetime(ano, 12, 31)
+    else:
+        meses_map = {
+            "Janeiro": 1, "Fevereiro": 2, "Março": 3, "Abril": 4,
+            "Maio": 5, "Junho": 6, "Julho": 7, "Agosto": 8,
+            "Setembro": 9, "Outubro": 10, "Novembro": 11, "Dezembro": 12
+        }
+        mes_num = meses_map[mes]
+        data_inicio = datetime(ano, mes_num, 1)
+        if mes_num == 12:
+            data_fim = datetime(ano, 12, 31)
+        else:
+            data_fim = datetime(ano, mes_num + 1, 1) - timedelta(days=1)
+    return data_inicio, data_fim
+
 def aplicar_filtro_periodo(df, campo_data, data_inicio, data_fim):
     if data_inicio and data_fim and campo_data in df.columns:
         df[campo_data] = pd.to_datetime(df[campo_data], errors='coerce')
@@ -433,21 +515,27 @@ def get_acordos_futuros():
     return int(df.iloc[0]['qtd']), float(df.iloc[0]['total'])
 
 def criar_solicitacao_reabertura(cliente_id, assistente, motivo):
-    with get_connection() as conn:
-        conn.execute('''
-            INSERT INTO solicitacoes_reabertura (cliente_id, assistente, motivo, status)
-            VALUES (?, ?, ?, 'pendente')
-        ''', (cliente_id, assistente, motivo))
-        conn.commit()
+    try:
+        with get_connection() as conn:
+            conn.execute('''
+                INSERT INTO solicitacoes_reabertura (cliente_id, assistente, motivo, status)
+                VALUES (?, ?, ?, 'pendente')
+            ''', (cliente_id, assistente, motivo))
+            conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao criar solicitação: {e}")
+        return False
 
 def listar_solicitacoes_pendentes():
     with get_connection() as conn:
         df = pd.read_sql_query('''
-            SELECT s.id, s.cliente_id, c.codigo_cliente, c.razao_social, s.assistente, s.motivo, s.data_solicitacao
+            SELECT s.id, s.cliente_id, c.codigo_cliente, c.razao_social, s.assistente, s.motivo, 
+                   datetime(s.data_solicitacao, 'localtime') as data_solicitacao
             FROM solicitacoes_reabertura s
             JOIN clientes c ON s.cliente_id = c.id
             WHERE s.status = 'pendente'
-            ORDER BY s.data_solicitacao
+            ORDER BY s.data_solicitacao DESC
         ''', conn)
     return df
 
@@ -493,71 +581,96 @@ if "autenticado" not in st.session_state:
     st.session_state.perfil = None
 
 if not st.session_state.autenticado:
-    st.title("🔐 Login")
-    col1, col2, col3 = st.columns([1,2,1])
+    st.markdown("<h1 style='text-align: center; margin-top: 1rem;'>🔐 Login</h1>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        email = st.text_input("Email")
-        senha = st.text_input("Senha", type="password")
-        if st.button("Entrar"):
-            user = verificar_login(email, senha)
-            if user:
-                st.session_state.autenticado = True
-                st.session_state.usuario = user[0]
-                st.session_state.perfil = user[1]
-                st.rerun()
-            else:
-                st.error("Credenciais inválidas.")
+        with st.container():
+            st.markdown('<div class="login-container">', unsafe_allow_html=True)
+            email = st.text_input("Email", key="login_email")
+            senha = st.text_input("Senha", type="password", key="login_senha")
+            if st.button("Entrar", use_container_width=True):
+                user = verificar_login(email, senha)
+                if user:
+                    st.session_state.autenticado = True
+                    st.session_state.usuario = user[0]
+                    st.session_state.perfil = user[1]
+                    st.rerun()
+                else:
+                    st.error("Credenciais inválidas.")
+            st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
 # ========== INTERFACE PRINCIPAL ==========
 st.sidebar.title(f"👤 {st.session_state.usuario}")
 st.sidebar.write(f"Perfil: **{st.session_state.perfil}**")
 
-if st.sidebar.button("🚪 Sair"):
+if st.sidebar.button("🚪 Sair", use_container_width=True):
     st.cache_data.clear()
     st.session_state.autenticado = False
     st.session_state.usuario = None
     st.session_state.perfil = None
     st.rerun()
 
+# ---------- FILTRO DE ANO/MÊS ----------
 st.sidebar.markdown("---")
-st.sidebar.subheader("📅 Filtro de Período")
-usar_filtro = st.sidebar.checkbox("Ativar filtro")
-if usar_filtro:
-    campo_filtro = st.sidebar.selectbox("Filtrar por:", ["Data de Vencimento", "Data de Emissão"])
-    campo_db = "vencimento" if campo_filtro == "Data de Vencimento" else "emissao"
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        data_inicio = st.date_input("Data inicial", value=datetime.now() - timedelta(days=30))
-    with col2:
-        data_fim = st.date_input("Data final", value=datetime.now())
+st.sidebar.subheader("📅 Filtro por Período")
+with get_connection() as conn:
+    anos_df = pd.read_sql_query("SELECT DISTINCT strftime('%Y', vencimento) as ano FROM clientes ORDER BY ano DESC", conn)
+    anos_disponiveis = anos_df['ano'].tolist() if not anos_df.empty else [str(datetime.now().year)]
+anos_opcoes = ["Todos"] + anos_disponiveis
+ano_selecionado = st.sidebar.selectbox("Ano", anos_opcoes, index=0 if "Todos" in anos_opcoes else 0)
+
+if ano_selecionado != "Todos":
+    mes_opcoes = ["Todos", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", 
+                  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+    mes_selecionado = st.sidebar.selectbox("Mês", mes_opcoes, index=0)
 else:
-    campo_db = "vencimento"
+    mes_selecionado = "Todos"
+
+if ano_selecionado == "Todos":
     data_inicio = None
     data_fim = None
+else:
+    data_inicio, data_fim = get_date_range_from_selection(
+        int(ano_selecionado) if ano_selecionado != "Todos" else None,
+        mes_selecionado
+    )
+campo_db = "vencimento"
 
+# Menu com badge de solicitações pendentes
 if st.session_state.perfil == "admin":
-    menu = st.sidebar.radio("Menu", ["📤 Upload", "📊 Dashboard Geral", "🔄 Solicitações de Reabertura", "📥 Exportar Dados", "🔄 Transferir Cliente"])
+    with get_connection() as conn:
+        pendentes = pd.read_sql_query("SELECT COUNT(*) as qtd FROM solicitacoes_reabertura WHERE status = 'pendente'", conn)
+        qtd_pendentes = pendentes.iloc[0]['qtd'] if not pendentes.empty else 0
+    
+    menu_opcoes = ["📤 Upload", "📊 Dashboard Geral", "🔄 Solicitações de Reabertura", "📥 Exportar Dados", "🔄 Transferir Cliente", "💾 Backup/Restore"]
+    menu_formatado = []
+    for op in menu_opcoes:
+        if "Solicitações de Reabertura" in op and qtd_pendentes > 0:
+            menu_formatado.append(f"{op} <span class='badge'>{qtd_pendentes}</span>")
+        else:
+            menu_formatado.append(op)
+    menu = st.sidebar.radio("Menu", menu_formatado, index=0, format_func=lambda x: x)
 else:
     menu = st.sidebar.radio("Menu", ["📋 Meus Clientes", "📊 Meu Dashboard"])
 
 # ========== ADMIN ==========
 if st.session_state.perfil == "admin":
-    if menu == "📤 Upload":
+    if menu.startswith("📤"):
         st.header("Upload da Planilha")
+        st.warning("⚠️ **Atenção:** Faça backup regularmente para não perder dados.")
         modo_upload = st.radio("Modo de upload:", ["Atualizar base (recomendado)", "Substituir base (apaga tudo)"])
         arquivo = st.file_uploader("Selecione o arquivo Excel", type=["xlsx", "xls"])
         if arquivo:
             modo = "atualizar" if "Atualizar" in modo_upload else "substituir"
             if modo == "substituir":
-                if not st.checkbox("CONFIRMO que desejo apagar todos os dados existentes"):
-                    st.warning("Marque a confirmação para prosseguir.")
-                    st.stop()
+                st.error("🚨 **MODO DE SUBSTITUIÇÃO TOTAL** 🚨")
+                st.write("Todos os dados atuais (clientes, tratativas, histórico) serão **PERMANENTEMENTE APAGADOS**.")
             df = processar_upload_excel(arquivo, modo=modo)
             if df is not None:
                 st.cache_data.clear()
 
-    elif menu == "📊 Dashboard Geral":
+    elif menu.startswith("📊"):
         st.header("Dashboard Gerencial")
         metricas = get_dashboard_data(data_inicio, data_fim, campo_db)
         total_clientes = int(metricas['total_titulos'])
@@ -610,7 +723,7 @@ if st.session_state.perfil == "admin":
             ''', conn)
         st.dataframe(top_inad, use_container_width=True)
 
-    elif menu == "🔄 Solicitações de Reabertura":
+    elif menu.startswith("🔄 Solicitações"):
         st.header("Solicitações de Reabertura")
         df_solic = listar_solicitacoes_pendentes()
         if df_solic.empty:
@@ -618,7 +731,8 @@ if st.session_state.perfil == "admin":
         else:
             for _, row in df_solic.iterrows():
                 with st.expander(f"Cliente {row['codigo_cliente']} - {row['razao_social']} (Solicitado por {row['assistente']})"):
-                    st.write(f"Motivo: {row['motivo']}")
+                    st.write(f"**Motivo:** {row['motivo']}")
+                    st.write(f"**Data da solicitação:** {row['data_solicitacao']}")
                     col1, col2 = st.columns(2)
                     with col1:
                         if st.button(f"✅ Aprovar", key=f"apr_{row['id']}"):
@@ -631,7 +745,7 @@ if st.session_state.perfil == "admin":
                             st.success("Rejeitada.")
                             st.rerun()
 
-    elif menu == "📥 Exportar Dados":
+    elif menu.startswith("📥"):
         st.header("Exportar Base Completa")
         with get_connection() as conn:
             df_export = pd.read_sql_query("SELECT * FROM clientes ORDER BY assistente_responsavel, status_tratativa", conn)
@@ -645,7 +759,7 @@ if st.session_state.perfil == "admin":
             st.download_button("📥 Baixar Excel", data=output.getvalue(),
                                file_name=f"base_cobranca_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx")
 
-    elif menu == "🔄 Transferir Cliente":
+    elif menu.startswith("🔄 Transferir"):
         st.header("Transferir Cliente entre Assistentes")
         codigo = st.text_input("Código do Cliente")
         nova = st.selectbox("Nova Assistente", ["Jane Xavier", "Renata Kelly"])
@@ -655,6 +769,29 @@ if st.session_state.perfil == "admin":
                 st.success(f"Cliente {codigo} transferido para {nova}.")
             else:
                 st.warning("Informe o código.")
+
+    elif menu.startswith("💾"):
+        st.header("Gerenciamento de Backup do Banco de Dados")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("💾 Fazer Backup")
+            if st.button("Criar backup agora"):
+                backup_path = create_backup()
+                st.success(f"Backup criado em: {backup_path}")
+                with open(backup_path, "rb") as f:
+                    st.download_button("📥 Baixar backup", f, file_name=os.path.basename(backup_path))
+        with col2:
+            st.subheader("📂 Restaurar Backup")
+            uploaded_backup = st.file_uploader("Selecione um arquivo .db de backup", type=["db"])
+            if uploaded_backup is not None:
+                if st.button("Restaurar este backup (substitui a base atual)"):
+                    senha_admin = st.text_input("Digite a senha do administrador para confirmar:", type="password", key="pwd_restore")
+                    if senha_admin == "admin123":
+                        if restore_backup(uploaded_backup):
+                            st.success("Backup restaurado com sucesso! Recarregue a página.")
+                            st.rerun()
+                    else:
+                        st.error("Senha incorreta.")
 
 # ========== ASSISTENTE ==========
 else:
@@ -674,16 +811,18 @@ else:
             else:
                 st.sidebar.warning("Código não encontrado.")
 
+    df_clientes_total = carregar_clientes_assistente(st.session_state.usuario)
+
     if menu == "📋 Meus Clientes":
         st.header(f"Clientes de {st.session_state.usuario}")
 
-        df_clientes = carregar_clientes_assistente(st.session_state.usuario)
-        if df_clientes.empty:
+        if df_clientes_total.empty:
             st.info("Nenhum título atribuído.")
             st.stop()
 
-        # Cards de status
-        st.subheader("📊 Status das Tratativas")
+        df_clientes_filtrado = aplicar_filtro_periodo(df_clientes_total.copy(), campo_db, data_inicio, data_fim)
+
+        st.subheader("📊 Status das Tratativas (Período)")
         status_list = list(STATUS_MAP.keys())
         cols = st.columns(len(status_list))
         if 'filtro_status' not in st.session_state:
@@ -698,7 +837,7 @@ else:
         }
 
         for i, status in enumerate(status_list):
-            df_status = df_clientes[df_clientes['status_tratativa'] == status]
+            df_status = df_clientes_filtrado[df_clientes_filtrado['status_tratativa'] == status]
             qtd = len(df_status)
             valor = df_status['valor_atualizado'].sum()
             with cols[i]:
@@ -719,13 +858,14 @@ else:
             if st.button("❌ Limpar filtro"):
                 st.session_state.filtro_status = None
                 st.rerun()
-            df_filtrado = df_clientes[df_clientes['status_tratativa'] == st.session_state.filtro_status]
+            df_filtrado = df_clientes_filtrado[df_clientes_filtrado['status_tratativa'] == st.session_state.filtro_status]
         else:
-            df_filtrado = df_clientes
+            df_filtrado = df_clientes_filtrado
 
-        st.subheader("📋 Lista de Clientes")
+        st.subheader("📋 Lista de Clientes (ordenada por maior atraso)")
         if not df_filtrado.empty:
-            codigos = df_filtrado['codigo_cliente'].unique().tolist()
+            df_ordenado = df_filtrado.sort_values('tempo_atraso', ascending=False)
+            codigos = df_ordenado['codigo_cliente'].unique().tolist()
             if 'cliente_selecionado' in st.session_state and st.session_state.cliente_selecionado in codigos:
                 default_idx = codigos.index(st.session_state.cliente_selecionado)
             else:
@@ -735,7 +875,7 @@ else:
                 "Selecione um cliente:",
                 codigos,
                 index=default_idx,
-                format_func=lambda c: f"{c} - {df_filtrado[df_filtrado['codigo_cliente']==c]['razao_social'].iloc[0]}"
+                format_func=lambda c: f"{c} - {df_ordenado[df_ordenado['codigo_cliente']==c]['razao_social'].iloc[0]} (Atraso: {df_ordenado[df_ordenado['codigo_cliente']==c]['tempo_atraso'].iloc[0]} dias)"
             )
 
             if codigo_sel:
@@ -750,7 +890,6 @@ else:
                     cliente_nome = titulos_df.iloc[0]['razao_social']
                     st.write(f"**{cliente_nome}** possui {len(titulos_df)} título(s).")
 
-                    # Tabela editável com checkboxes
                     titulos_df['Selecionar'] = False
                     edited_df = st.data_editor(
                         titulos_df[['Selecionar', 'numero_titulo', 'vencimento', 'valor_atualizado', 'status_tratativa', 'observacao']],
@@ -763,8 +902,6 @@ else:
 
                     if ids_selecionados:
                         st.write(f"{len(ids_selecionados)} título(s) selecionado(s).")
-
-                        # Filtrar apenas títulos que não são acordo_finalizado para ação em lote
                         ids_validos = [tid for tid in ids_selecionados if titulos_df[titulos_df['id']==tid]['status_tratativa'].iloc[0] != 'acordo_finalizado']
                         if len(ids_validos) < len(ids_selecionados):
                             st.warning("Alguns títulos com 'Acordo Finalizado' não serão alterados.")
@@ -776,6 +913,9 @@ else:
                                 obs = st.text_area("Observações")
                                 data_pag = st.date_input("Data de Pagamento Programado (opcional)", value=None, min_value=datetime.today())
                                 valor_acordo = None
+                                data_pag_realizado = None
+                                if novo_status == 'acordo_finalizado':
+                                    data_pag_realizado = st.date_input("Data de Pagamento Realizado em:", value=datetime.today(), max_value=datetime.today())
                                 if data_pag:
                                     ex = titulos_df[titulos_df['id'] == ids_validos[0]].iloc[0]
                                     valor_proj = calcular_juros_projetado(ex['valor_original'], ex['vencimento'], data_pag.strftime('%Y-%m-%d'))
@@ -784,12 +924,12 @@ else:
                                 if st.form_submit_button("Aplicar aos selecionados"):
                                     obs_completa = f"{motivo}: {obs}" if motivo else obs
                                     data_str = data_pag.strftime('%Y-%m-%d') if data_pag else None
+                                    data_real_str = data_pag_realizado.strftime('%Y-%m-%d') if data_pag_realizado else None
                                     for tid in ids_validos:
-                                        atualizar_status_cliente(tid, novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo)
+                                        atualizar_status_cliente(tid, novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo, data_real_str)
                                     st.success(f"{len(ids_validos)} título(s) atualizado(s)!")
                                     st.rerun()
 
-                    # Detalhes de título individual com possibilidade de alteração (exceto acordo_finalizado)
                     with st.expander("🔎 Ver/Editar título específico"):
                         titulo_det = st.selectbox("Número do título:", titulos_df['numero_titulo'].tolist())
                         if titulo_det:
@@ -809,6 +949,8 @@ else:
                                 st.write(f"**Status:** {STATUS_MAP.get(titulo['status_tratativa'], titulo['status_tratativa'])}")
                                 if titulo['data_pagamento_programado']:
                                     st.write(f"**Pagamento Programado:** {titulo['data_pagamento_programado']}")
+                                if titulo['data_pagamento_realizado']:
+                                    st.write(f"**Pagamento Realizado:** {titulo['data_pagamento_realizado']}")
 
                             status_atual = titulo['status_tratativa']
                             if status_atual != 'acordo_finalizado':
@@ -818,6 +960,9 @@ else:
                                     obs = st.text_area("Observações", key=f"obs_{titulo['id']}")
                                     data_pag = st.date_input("Data de Pagamento Programado (opcional)", value=None, min_value=datetime.today(), key=f"data_{titulo['id']}")
                                     valor_acordo = None
+                                    data_pag_realizado = None
+                                    if novo_status == 'acordo_finalizado':
+                                        data_pag_realizado = st.date_input("Data de Pagamento Realizado em:", value=datetime.today(), max_value=datetime.today(), key=f"real_{titulo['id']}")
                                     if data_pag:
                                         valor_proj = calcular_juros_projetado(titulo['valor_original'], titulo['vencimento'], data_pag.strftime('%Y-%m-%d'))
                                         st.write(f"💡 Valor projetado: R$ {valor_proj:,.2f}")
@@ -825,29 +970,39 @@ else:
                                     if st.form_submit_button("Atualizar"):
                                         obs_completa = f"{motivo}: {obs}" if motivo else obs
                                         data_str = data_pag.strftime('%Y-%m-%d') if data_pag else None
-                                        if atualizar_status_cliente(titulo['id'], novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo):
+                                        data_real_str = data_pag_realizado.strftime('%Y-%m-%d') if data_pag_realizado else None
+                                        if atualizar_status_cliente(titulo['id'], novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo, data_real_str):
                                             st.success("Título atualizado!")
                                             st.rerun()
                             else:
-                                st.warning("Títulos com 'Acordo Finalizado' não podem ser alterados diretamente. Solicite reabertura se necessário.")
-
+                                st.warning("Títulos com 'Acordo Finalizado' não podem ser alterados diretamente.")
+                                with st.form(f"form_reabertura_{titulo['id']}"):
+                                    motivo_reab = st.text_area("Justificativa para reabertura")
+                                    if st.form_submit_button("📩 Solicitar Reabertura"):
+                                        if motivo_reab.strip():
+                                            if criar_solicitacao_reabertura(titulo['id'], st.session_state.usuario, motivo_reab):
+                                                st.success("Solicitação enviada ao administrador!")
+                                                st.rerun()
+                                            else:
+                                                st.error("Erro ao enviar solicitação. Tente novamente.")
+                                        else:
+                                            st.error("Descreva o motivo da reabertura.")
         else:
             st.info("Nenhum cliente com este status.")
 
     elif menu == "📊 Meu Dashboard":
         st.header("Meu Desempenho")
-        df_clientes = carregar_clientes_assistente(st.session_state.usuario)
-        if df_clientes.empty:
+        if df_clientes_total.empty:
             st.info("Sem dados.")
             st.stop()
 
-        df_clientes_filtrado = aplicar_filtro_periodo(df_clientes.copy(), campo_db, data_inicio, data_fim)
+        df_clientes_filtrado = aplicar_filtro_periodo(df_clientes_total.copy(), campo_db, data_inicio, data_fim)
 
         metricas_global = get_dashboard_data(data_inicio, data_fim, campo_db)
         total_global = float(metricas_global['valor_total'])
         inad_global = float(metricas_global['valor_inadimplente'])
         percent_global = (inad_global / total_global * 100) if total_global else 0
-        st.metric("🌍 Inadimplência Global", f"{percent_global:.2f}%", delta="Meta ≤3%" if percent_global <=3 else "Acima da meta")
+        st.metric("🌍 Inadimplência Global (período)", f"{percent_global:.2f}%", delta="Meta ≤3%" if percent_global <=3 else "Acima da meta")
 
         total_ind = df_clientes_filtrado['valor_atualizado'].sum()
         df_inad_ind = df_clientes_filtrado[df_clientes_filtrado.apply(is_inadimplente, axis=1)]
@@ -855,15 +1010,14 @@ else:
         percent_ind = (inad_ind / total_ind * 100) if total_ind else 0
         qtd_inad = len(df_inad_ind)
 
-        # NOVOS INDICADORES
-        clientes_unicos = df_clientes_filtrado['codigo_cliente'].nunique()
-        total_boletos = len(df_clientes_filtrado)
+        clientes_unicos_filtrado = df_clientes_filtrado['codigo_cliente'].nunique()
+        total_boletos_filtrado = len(df_clientes_filtrado)
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Meu Valor Aberto", f"R$ {total_ind:,.2f}")
         col2.metric("Minha Inadimplência", f"{percent_ind:.2f}%")
-        col3.metric("Clientes Únicos", clientes_unicos)
-        col4.metric("Total de Boletos", total_boletos)
+        col3.metric("Clientes Únicos", clientes_unicos_filtrado)
+        col4.metric("Total de Boletos", total_boletos_filtrado)
 
         qtd_hoje, val_hoje = get_acordos_hoje()
         if qtd_hoje > 0:
@@ -894,7 +1048,6 @@ else:
         with col_c:
             st.metric("Acordos Programados Futuros", f"{qtd_fut} títulos", f"R$ {val_fut:,.2f}")
 
-        # Forecast
         df_pendentes = df_ass[df_ass['status_tratativa'] == 'acordo_pendente']
         if not df_pendentes.empty:
             valor_pendente = df_pendentes['valor_atualizado'].sum()
@@ -903,7 +1056,6 @@ else:
             st.subheader("🔮 Projeção")
             st.write(f"Se todos os **acordos pendentes** (R$ {valor_pendente:,.2f}) forem finalizados, sua inadimplência cairá para **{nova_taxa:.2f}%**.")
 
-        # Meta para 3%
         if percent_ind > 3:
             valor_necessario = inad_ind - (0.03 * total_ind)
             st.subheader("🎯 Meta para 3%")
@@ -940,4 +1092,4 @@ else:
         st.dataframe(top5, use_container_width=True)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Dashboard Financeiro v11.1")
+st.sidebar.caption("Dashboard Financeiro v11.8")
