@@ -135,9 +135,9 @@ def init_db():
 
 def criar_usuarios_iniciais():
     usuarios = [
-        ("Edvanison Muniz", "edvanison@empresa.com", "admin123", "admin"),
-        ("Jane Xavier", "jane@empresa.com", "jane123", "assistente"),
-        ("Renata Kelly", "renata@empresa.com", "renata123", "assistente")
+        ("Edvanison Muniz", "edvanison@empresa.com", "E1d2v3a4hub2026", "admin"),
+        ("Jane Xavier", "jane@empresa.com", "J1a2n3e4@2026", "assistente"),
+        ("Renata Kelly", "renata@empresa.com", "R1e2n3a4t5a6@2026", "assistente")
     ]
     with get_connection() as conn:
         for nome, email, senha, perfil in usuarios:
