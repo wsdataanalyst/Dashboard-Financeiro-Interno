@@ -1,6 +1,6 @@
 """
 Dashboard Financeiro e Resultados - Sistema de Cobrança
-Versão 12.7 - Estável (base 12.4) + mensagem reabertura + botão Aprovar Todas
+Versão 13.0 - Bcrypt, sessão com timeout, troca de senha mensal, atualizar dados
 """
 
 import streamlit as st
@@ -10,36 +10,129 @@ import unicodedata
 import sqlite3
 import shutil
 import os
+import time
+import re
 from datetime import datetime, timedelta
 import plotly.express as px
+import bcrypt
+
+SESSAO_TIMEOUT_SEGUNDOS = int(os.environ.get("STREAMLIT_SESSION_TIMEOUT", "1800"))
+SENHA_MIN_LEN = 8
+BACKUP_OBRIGATORIO_VALIDADE_MIN = int(os.environ.get("BACKUP_REQUIRED_VALID_MIN", "180"))
+
+PERFIS_LABEL = {
+    "supervisor": "Supervisor",
+    "desenvolvedor": "Desenvolvedor",
+    "assistente": "Assistente",
+}
+
+PERFIS_VISAO_GERAL = {"supervisor", "desenvolvedor"}
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="Dashboard Financeiro", page_icon="💰", layout="wide")
 
 st.markdown("""
 <style>
-    html, body, [class*="css"] { font-size: 20px; }
-    h1 { font-size: 2.8rem !important; }
-    h2 { font-size: 2.2rem !important; }
-    h3 { font-size: 1.8rem !important; }
-    [data-testid="stMetricValue"] { font-size: 2.2rem !important; }
-    [data-testid="stMetricLabel"] { font-size: 1.2rem !important; }
-    .stButton button { font-size: 1.2rem !important; padding: 0.6rem 1.2rem !important; }
-    .stTextInput > div > div > input { font-size: 1.2rem !important; }
-    .stSelectbox > div > div > div { font-size: 1.2rem !important; }
-    .login-container {
-        max-width: 480px; margin: 0 auto; padding: 40px 30px;
-        background-color: #1e1e1e; border-radius: 20px;
-        box-shadow: 0 4px 20px rgba(0, 255, 0, 0.2); border: 1px solid #2e7d32;
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
+    html, body, [class*="css"] { font-size: 18px; font-family: 'DM Sans', system-ui, sans-serif !important; }
+    .stApp {
+        background: radial-gradient(1200px 800px at 10% -10%, rgba(99, 102, 241, 0.12), transparent 55%),
+                    radial-gradient(900px 600px at 100% 0%, rgba(56, 189, 248, 0.08), transparent 50%),
+                    linear-gradient(165deg, #0b0f14 0%, #0f1419 40%, #0a0d12 100%) !important;
     }
-    .login-title { text-align: center; color: #4caf50 !important; margin-bottom: 10px; font-weight: 700; }
-    .login-subtitle { text-align: center; color: #a5d6a7 !important; margin-bottom: 30px; font-size: 1rem; }
-    .stTextInput > label, .stTextInput > div > label { color: #e0e0e0 !important; }
-    .stTextInput input { background-color: #2d2d2d !important; color: #ffffff !important; border: 1px solid #4caf50 !important; }
-    .stButton button { background-color: #2e7d32 !important; color: white !important; font-weight: bold !important; border: none !important; transition: 0.3s !important; }
-    .stButton button:hover { background-color: #1b5e20 !important; box-shadow: 0 0 10px #4caf50 !important; }
-    .block-container { padding-top: 2rem !important; }
-    .main { background-color: #121212; }
+    [data-testid="stHeader"] { background: rgba(11, 15, 20, 0.85) !important; backdrop-filter: blur(8px); border-bottom: 1px solid rgba(148, 163, 184, 0.08); }
+    .block-container { padding-top: 1.25rem !important; max-width: 1400px; }
+    .main .block-container { padding-left: 2rem; padding-right: 2rem; }
+
+    h1 { font-size: 2.15rem !important; font-weight: 700 !important; letter-spacing: -0.03em !important; color: #f1f5f9 !important; }
+    h2 { font-size: 1.65rem !important; font-weight: 600 !important; color: #e2e8f0 !important; letter-spacing: -0.02em; }
+    h3 { font-size: 1.35rem !important; font-weight: 600 !important; color: #cbd5e1 !important; }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.65rem !important; font-weight: 600 !important; color: #f8fafc !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.78rem !important; font-weight: 600 !important; color: #94a3b8 !important;
+        text-transform: uppercase; letter-spacing: 0.06em !important;
+    }
+    [data-testid="stMetricDelta"] { font-size: 0.85rem !important; }
+
+    div[data-testid="stMetricContainer"] {
+        background: linear-gradient(145deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.65) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+        border-radius: 14px;
+        padding: 1rem 1.1rem !important;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+    }
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0f172a 0%, #0c1220 100%) !important;
+        border-right: 1px solid rgba(99, 102, 241, 0.12) !important;
+    }
+    section[data-testid="stSidebar"] .stMarkdown strong { color: #c7d2fe !important; }
+    section[data-testid="stSidebar"] label { color: #cbd5e1 !important; }
+
+    .stButton > button {
+        font-size: 1rem !important; font-weight: 600 !important; padding: 0.55rem 1.1rem !important;
+        border-radius: 10px !important; border: none !important;
+        background: linear-gradient(135deg, #4f46e5 0%, #6366f1 48%, #818cf8 100%) !important;
+        color: #fff !important;
+        box-shadow: 0 4px 16px rgba(99, 102, 241, 0.35);
+        transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease !important;
+    }
+    .stButton > button:hover {
+        filter: brightness(1.06);
+        box-shadow: 0 6px 22px rgba(129, 140, 248, 0.45);
+    }
+    .stButton > button:active { transform: scale(0.98); }
+
+    .stTextInput > div > div > input, .stTextArea > div > div > textarea {
+        font-size: 1rem !important; border-radius: 10px !important;
+        background-color: rgba(30, 41, 59, 0.55) !important;
+        color: #f1f5f9 !important;
+        border: 1px solid rgba(148, 163, 184, 0.22) !important;
+    }
+    .stTextInput > div > div > input:focus, .stTextArea > div > div > textarea:focus {
+        border-color: rgba(129, 140, 248, 0.55) !important;
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.22) !important;
+    }
+    .stTextInput label, .stTextArea label, .stSelectbox label, .stDateInput label, .stNumberInput label { color: #cbd5e1 !important; }
+
+    div[data-baseweb="select"] > div {
+        border-radius: 10px !important;
+        background-color: rgba(30, 41, 59, 0.55) !important;
+        border-color: rgba(148, 163, 184, 0.22) !important;
+    }
+
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+        border-radius: 12px !important;
+        border: 1px solid rgba(148, 163, 184, 0.1) !important;
+        overflow: hidden;
+    }
+
+    .stExpander { border: 1px solid rgba(148, 163, 184, 0.12) !important; border-radius: 12px !important; background: rgba(15, 23, 42, 0.35) !important; }
+    .stExpander summary { font-weight: 600; color: #e2e8f0 !important; }
+
+    div[data-testid="stRadio"] label { color: #e2e8f0 !important; }
+
+    /* Login — bloco visual (campos ficam abaixo; Streamlit não aninha widgets no HTML) */
+    .login-hero-card {
+        width: 100%; max-width: 420px; margin: 0 auto 1.5rem; padding: 2rem 1.75rem;
+        background: linear-gradient(155deg, rgba(51, 65, 85, 0.42) 0%, rgba(15, 23, 42, 0.9) 100%);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-radius: 22px;
+        border: 1px solid rgba(165, 180, 252, 0.22);
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+    }
+    .login-title {
+        text-align: center; margin: 0 0 0.35rem 0; font-weight: 700; font-size: 1.75rem; letter-spacing: -0.03em;
+        background: linear-gradient(110deg, #e0e7ff 0%, #c7d2fe 35%, #a5b4fc 70%, #93c5fd 100%);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .login-subtitle {
+        text-align: center; color: #94a3b8 !important; margin: 0 0 1.75rem 0; font-size: 0.95rem; font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -54,8 +147,164 @@ STATUS_MAP = {
     'acordo_pendente': '⏰ Acordo Pendente'
 }
 
-DB_PATH = "cobranca.db"
-BACKUP_DIR = "backups"
+STATUS_CARD_THEMES = {
+    'pendente': ('linear-gradient(152deg, #334155 0%, #475569 100%)', '#cbd5e1'),
+    'em_tratativa': ('linear-gradient(152deg, #172554 0%, #1d4ed8 45%, #3b82f6 100%)', '#bfdbfe'),
+    'contatado_sem_exito': ('linear-gradient(152deg, #450a0a 0%, #b91c1c 55%, #ef4444 100%)', '#fecaca'),
+    'acordo_finalizado': ('linear-gradient(152deg, #042f2e 0%, #0f766e 45%, #14b8a6 100%)', '#ccfbf1'),
+    'acordo_pendente': ('linear-gradient(152deg, #422006 0%, #c2410c 45%, #f59e0b 100%)', '#fde68a'),
+}
+
+
+def render_status_card(status_key, qtd, valor):
+    bg, val_color = STATUS_CARD_THEMES[status_key]
+    label = STATUS_MAP[status_key]
+    valor_str = f"R$ {valor:,.2f}"
+    return f"""
+    <div style="background:{bg};padding:16px 12px;border-radius:16px;text-align:center;margin-bottom:8px;
+                border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 28px rgba(0,0,0,0.22);">
+        <h4 style="color:rgba(255,255,255,0.93);margin:0;font-size:0.86rem;font-weight:600;line-height:1.25">{label}</h4>
+        <h2 style="color:#fff;margin:8px 0;font-size:1.55rem;font-weight:700">{qtd}</h2>
+        <p style="color:{val_color};margin:0;font-size:0.92rem;font-weight:600">{valor_str}</p>
+    </div>
+    """
+
+
+def aplicar_tema_plotly(fig, altura=None):
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(15, 23, 42, 0.5)',
+        font=dict(color='#e2e8f0', family='DM Sans, system-ui, sans-serif'),
+        margin=dict(t=52, b=52, l=56, r=32),
+        title=dict(font=dict(size=15, color='#f1f5f9')),
+        legend=dict(bgcolor='rgba(15,23,42,0.7)', bordercolor='rgba(148,163,184,0.2)', borderwidth=1),
+        xaxis=dict(gridcolor='rgba(148,163,184,0.12)', zerolinecolor='rgba(148,163,184,0.15)', tickfont=dict(color='#94a3b8')),
+        yaxis=dict(gridcolor='rgba(148,163,184,0.12)', zerolinecolor='rgba(148,163,184,0.15)', tickfont=dict(color='#94a3b8')),
+    )
+    if altura:
+        fig.update_layout(height=altura)
+    return fig
+
+
+DB_PATH = os.environ.get("DB_PATH", "cobranca.db")
+BACKUP_DIR = os.environ.get("BACKUP_DIR", "backups")
+
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+
+
+def verificar_hash_armazenado(plain: str, stored: str):
+    """Retorna (senha_ok, migrar_sha256_para_bcrypt)."""
+    if not stored:
+        return False, False
+    if stored.startswith("$2"):
+        try:
+            return bcrypt.checkpw(plain.encode("utf-8"), stored.encode("utf-8")), False
+        except Exception:
+            return False, False
+    leg = hashlib.sha256(plain.encode()).hexdigest()
+    if leg.lower() == (stored or "").strip().lower():
+        return True, True
+    return False, False
+
+
+def atualizar_senha_no_banco(email_db: str, nova_senha: str):
+    nh = hash_password(nova_senha)
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE usuarios SET senha_hash = ?, ultima_troca_senha = ? WHERE email = ?",
+            (nh, hoje, email_db),
+        )
+        conn.commit()
+    st.cache_data.clear()
+
+
+def obter_ultima_troca_senha(email: str):
+    with get_connection() as conn:
+        r = conn.execute(
+            "SELECT ultima_troca_senha FROM usuarios WHERE email = ?",
+            (email,),
+        ).fetchone()
+    return r[0] if r else None
+
+
+def precisa_trocar_senha_mensal(email: str) -> bool:
+    mes_atual = datetime.now().strftime("%Y-%m")
+    ult = obter_ultima_troca_senha(email)
+    if ult is None or len(str(ult)) < 7:
+        return True
+    return str(ult)[:7] < mes_atual
+
+
+def verificar_senha_usuario(email: str, senha: str) -> bool:
+    with get_connection() as conn:
+        r = conn.execute("SELECT senha_hash FROM usuarios WHERE email = ?", (email,)).fetchone()
+    if not r:
+        return False
+    ok, _ = verificar_hash_armazenado(senha, r[0])
+    return ok
+
+
+def validar_forca_senha(nova: str):
+    if len(nova) < SENHA_MIN_LEN:
+        return f"A nova senha deve ter pelo menos {SENHA_MIN_LEN} caracteres."
+    if not re.search(r"[A-Za-z]", nova) or not re.search(r"\d", nova):
+        return "Use letras e números na nova senha."
+    return None
+
+
+def limpar_sessao_auth():
+    for k in ("_troca_senha_ui", "flash_reabertura", "flash_atualizar_dados", "flash_senha_ok", "cliente_selecionado"):
+        if k in st.session_state:
+            del st.session_state[k]
+    st.session_state.autenticado = False
+    st.session_state.usuario = None
+    st.session_state.perfil = None
+    st.session_state.email = None
+    st.session_state.last_activity = None
+
+
+def render_tela_trocar_senha(email: str, nome: str, obrigatoria_mes: bool):
+    if obrigatoria_mes:
+        st.markdown(
+            '<style>section[data-testid="stSidebar"]{display:none!important;}</style>',
+            unsafe_allow_html=True,
+        )
+        st.header("Renovação de senha (novo mês)")
+        st.warning(
+            "Por segurança, é **obrigatório** criar uma nova senha no primeiro acesso após o início de cada **mês calendário**."
+        )
+    else:
+        st.header("Alterar minha senha")
+    st.caption(f"**{nome}** · {email}")
+    with st.form("form_trocar_senha_global"):
+        atual = st.text_input("Senha atual", type="password")
+        nova = st.text_input("Nova senha", type="password")
+        conf = st.text_input("Confirmar nova senha", type="password")
+        sub = st.form_submit_button("Salvar nova senha")
+    if not obrigatoria_mes:
+        if st.button("Cancelar"):
+            st.session_state["_troca_senha_ui"] = False
+            st.rerun()
+    if sub:
+        err = validar_forca_senha(nova)
+        if err:
+            st.error(err)
+            return
+        if nova != conf:
+            st.error("A confirmação não coincide com a nova senha.")
+            return
+        if not verificar_senha_usuario(email, atual):
+            st.error("Senha atual incorreta.")
+            return
+        atualizar_senha_no_banco(email, nova)
+        st.session_state["_troca_senha_ui"] = False
+        st.session_state["flash_senha_ok"] = True
+        st.rerun()
+
 
 # ---------- CONEXÃO COM SQLITE ----------
 @st.cache_resource
@@ -131,35 +380,89 @@ def init_db():
                 admin_responsavel TEXT
             )
         ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS auditoria_eventos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tipo TEXT NOT NULL,
+                usuario TEXT,
+                detalhes TEXT,
+                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cur_u = conn.execute("PRAGMA table_info(usuarios)")
+        cols_u = [row[1] for row in cur_u.fetchall()]
+        if "ultima_troca_senha" not in cols_u:
+            conn.execute("ALTER TABLE usuarios ADD COLUMN ultima_troca_senha TEXT")
+            primeiro_mes = datetime.now().strftime("%Y-%m-01")
+            conn.execute(
+                "UPDATE usuarios SET ultima_troca_senha = ? WHERE ultima_troca_senha IS NULL",
+                (primeiro_mes,),
+            )
+        # Migração de perfil e correção de nome (legado)
+        conn.execute("UPDATE usuarios SET perfil = 'supervisor' WHERE perfil = 'admin'")
+        conn.execute(
+            "UPDATE usuarios SET perfil = 'desenvolvedor' WHERE lower(email) = lower(?)",
+            ("wsdataanalyst",),
+        )
+        conn.execute(
+            "UPDATE usuarios SET nome = ? WHERE lower(email) = lower(?)",
+            ("Edvanisson Muniz", "edvanison@empresa.com"),
+        )
         conn.commit()
+
 
 def criar_usuarios_iniciais():
     usuarios = [
-        ("Edvanison Muniz", "edvanison@empresa.com", "@admin123", "admin"),
+        ("Edvanisson Muniz", "edvanison@empresa.com", "@admin123", "supervisor"),
         ("Jane Xavier", "jane@empresa.com", "@jane123", "assistente"),
-        ("Renata Kelly", "renata@empresa.com", "@renata123", "assistente")
+        ("Renata Kelly", "renata@empresa.com", "@renata123", "assistente"),
+        ("WS Data Analyst", "wsdataanalyst", "Alterar@1234", "desenvolvedor"),
     ]
+    hoje = datetime.now().strftime("%Y-%m-%d")
     with get_connection() as conn:
         for nome, email, senha, perfil in usuarios:
-            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-            cur = conn.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
+            em = email.strip().lower()
+            cur = conn.execute("SELECT id FROM usuarios WHERE email = ?", (em,))
             if cur.fetchone() is None:
                 conn.execute(
-                    "INSERT INTO usuarios (nome, email, senha_hash, perfil) VALUES (?, ?, ?, ?)",
-                    (nome, email, senha_hash, perfil)
+                    "INSERT INTO usuarios (nome, email, senha_hash, perfil, ultima_troca_senha) VALUES (?, ?, ?, ?, ?)",
+                    (nome, em, hash_password(senha), perfil, "2000-01-01" if em == "wsdataanalyst" else hoje),
                 )
         conn.commit()
 
+
 def verificar_login(email, senha):
-    senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-    with get_connection() as conn:
-        df = pd.read_sql_query(
-            "SELECT nome, perfil FROM usuarios WHERE email = ? AND senha_hash = ?",
-            conn, params=(email, senha_hash)
-        )
-    if not df.empty:
-        return df.iloc[0]['nome'], df.iloc[0]['perfil']
-    return None
+    em = (email or "").strip().lower()
+    if not em:
+        return None
+    def _get_user_row(email_key: str):
+        with get_connection() as conn:
+            return conn.execute(
+                "SELECT nome, perfil, senha_hash, email FROM usuarios WHERE email = ?",
+                (email_key,),
+            ).fetchone()
+
+    row = _get_user_row(em)
+    if not row and "@" in em:
+        # Aceita login por e-mail corporativo mesmo quando o usuário foi cadastrado sem domínio
+        em2 = em.split("@", 1)[0].strip()
+        if em2:
+            row = _get_user_row(em2)
+    if not row:
+        return None
+    nome, perfil, stored_hash, email_db = row
+    ok, migrar = verificar_hash_armazenado(senha, stored_hash)
+    if not ok:
+        return None
+    if migrar:
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE usuarios SET senha_hash = ?, ultima_troca_senha = ? WHERE email = ?",
+                (hash_password(senha), datetime.now().strftime("%Y-%m-%d"), email_db),
+            )
+            conn.commit()
+        st.cache_data.clear()
+    return nome, perfil, email_db
 
 def create_backup():
     if not os.path.exists(BACKUP_DIR):
@@ -169,11 +472,54 @@ def create_backup():
     shutil.copy2(DB_PATH, backup_path)
     return backup_path
 
-def restore_backup(uploaded_file):
+
+def create_backup_registrado(usuario=None):
+    path = create_backup()
+    registrar_auditoria("backup_create", usuario, os.path.basename(path))
+    st.session_state["backup_ok_ts"] = time.time()
+    return path
+
+
+def backup_ok_recente() -> bool:
+    ts = st.session_state.get("backup_ok_ts")
+    if not ts:
+        return False
+    return (time.time() - float(ts)) <= (BACKUP_OBRIGATORIO_VALIDADE_MIN * 60)
+
+
+def exigir_backup_supervisor(titulo: str):
+    st.warning(
+        f"Para segurança dos dados, é obrigatório criar um **backup** antes de usar **{titulo}**."
+    )
+    st.caption(
+        f"Validade do backup para liberar ações: **{BACKUP_OBRIGATORIO_VALIDADE_MIN} min**. "
+        "Após isso, o sistema volta a exigir um novo backup."
+    )
+    if st.button("💾 Criar backup obrigatório agora", use_container_width=True):
+        path = create_backup_registrado(st.session_state.get("usuario"))
+        st.success("Backup criado. Baixe e guarde este arquivo em local seguro.")
+        with open(path, "rb") as f:
+            st.download_button("📥 Baixar backup", f, file_name=os.path.basename(path))
+        st.rerun()
+    st.stop()
+
+def registrar_auditoria(tipo, usuario, detalhes=""):
     try:
-        create_backup()
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO auditoria_eventos (tipo, usuario, detalhes) VALUES (?, ?, ?)",
+                (tipo, usuario or "", (detalhes or "")[:8000]),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+def restore_backup(uploaded_file, usuario=None):
+    try:
+        create_backup_registrado(usuario)
         with open(DB_PATH, 'wb') as f:
             f.write(uploaded_file.getbuffer())
+        registrar_auditoria("restore_backup", usuario, getattr(uploaded_file, "name", "upload.db"))
         st.cache_data.clear()
         st.cache_resource.clear()
         return True
@@ -249,19 +595,44 @@ def processar_upload_excel(arquivo, modo="atualizar"):
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     if 'Atraso(D)' in df.columns:
         df['Atraso(D)'] = pd.to_numeric(df['Atraso(D)'], errors='coerce').fillna(0).astype(int)
-    df['assistente_responsavel'] = df['Atraso(D)'].apply(
-        lambda x: 'Jane Xavier' if x <= 30 else 'Renata Kelly'
-    )
     with get_connection() as conn:
+        # Mapa de contexto existente por cliente: assistente atual + status predominante (para novos títulos)
+        mapa_cliente = {}
+        try:
+            base_ctx = pd.read_sql_query(
+                "SELECT codigo_cliente, assistente_responsavel, status_tratativa FROM clientes",
+                conn,
+            )
+            if not base_ctx.empty:
+                prioridade = {"em_tratativa": 3, "acordo_pendente": 2, "contatado_sem_exito": 1, "pendente": 0, "acordo_finalizado": -1}
+                for cod, sub in base_ctx.groupby("codigo_cliente"):
+                    ass = sub["assistente_responsavel"].dropna().astype(str).iloc[0] if not sub["assistente_responsavel"].dropna().empty else None
+                    sts = sub["status_tratativa"].dropna().astype(str).tolist()
+                    # Não propaga "acordo_finalizado" como default para títulos novos
+                    sts_valid = [s for s in sts if s in prioridade and s != "acordo_finalizado"]
+                    if sts_valid:
+                        sts_valid.sort(key=lambda s: prioridade.get(s, 0), reverse=True)
+                        stp = sts_valid[0]
+                    else:
+                        stp = "pendente"
+                    mapa_cliente[str(cod).strip()] = {"assistente": ass, "status": stp}
+        except Exception:
+            mapa_cliente = {}
+
         if modo == "substituir":
-            senha_admin = st.text_input("Digite a senha do administrador para confirmar a substituição total da base:", type="password")
-            if senha_admin != "admin123":
+            senha_admin = st.text_input(
+                "Digite sua senha de login (Supervisor) para confirmar a substituição total da base:",
+                type="password",
+            )
+            email_adm = st.session_state.get("email")
+            if not email_adm or not verificar_senha_usuario(email_adm, senha_admin):
                 st.error("Senha incorreta. Operação cancelada.")
                 return None
             conn.execute("DELETE FROM clientes")
             conn.execute("DELETE FROM historico_tratativas")
             conn.execute("DELETE FROM solicitacoes_reabertura")
             conn.commit()
+            registrar_auditoria("upload_substituir_total", st.session_state.get("usuario"), f"registros_planilha={len(df)}")
             st.warning("Base antiga removida. Inserindo novos dados...")
         total = len(df)
         progress = st.progress(0, f"Processando {total} registros...")
@@ -283,13 +654,18 @@ def processar_upload_excel(arquivo, modo="atualizar"):
             canal = str(row.get('CANAL', '')) if pd.notna(row.get('CANAL', '')) else ''
             parcela = str(row['Parcela']).strip()
             tipo_fat = str(row['Tipo'])
-            assistente = row['assistente_responsavel']
+            # Preserva assistente e status do cliente já tratado, quando existir
+            if codigo in mapa_cliente and mapa_cliente[codigo].get("assistente"):
+                assistente = mapa_cliente[codigo]["assistente"]
+            else:
+                assistente = 'Jane Xavier' if tempo_atraso <= 30 else 'Renata Kelly'
+            status_inicial = mapa_cliente.get(codigo, {}).get("status", "pendente")
             conn.execute('''
                 INSERT INTO clientes (
                     codigo_cliente, numero_titulo, razao_social, valor_original, juros, valor_atualizado,
                     tempo_atraso, emissao, vencimento, parcela, tipo_faturamento, vendedor, situacao,
                     historico_contato, canal, assistente_responsavel, status_tratativa, observacao
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente', '')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
                 ON CONFLICT(codigo_cliente, numero_titulo) DO UPDATE SET
                     razao_social = excluded.razao_social,
                     valor_original = excluded.valor_original,
@@ -304,12 +680,11 @@ def processar_upload_excel(arquivo, modo="atualizar"):
                     situacao = excluded.situacao,
                     historico_contato = excluded.historico_contato,
                     canal = excluded.canal,
-                    assistente_responsavel = excluded.assistente_responsavel,
                     data_ultima_atualizacao = CURRENT_TIMESTAMP
             ''', (
                 codigo, titulo, razao, valor_original, juros, valor_atualizado,
                 tempo_atraso, emissao_str, vencimento_str, parcela, tipo_fat, vendedor, situacao,
-                hist_contato, canal, assistente
+                hist_contato, canal, assistente, status_inicial
             ))
             if i % batch_size == 0:
                 conn.commit()
@@ -317,6 +692,8 @@ def processar_upload_excel(arquivo, modo="atualizar"):
         conn.commit()
         progress.empty()
         st.success(f"Upload concluído! {total} registros processados.")
+        if modo == "atualizar":
+            registrar_auditoria("upload_atualizar", st.session_state.get("usuario"), f"registros={total}; tratativas preservadas nos títulos já existentes")
         st.cache_data.clear()
         return df
 
@@ -508,10 +885,68 @@ def processar_solicitacao(solicitacao_id, aprovado, admin_nome):
         conn.commit()
     st.cache_data.clear()
 
-def transferir_cliente(codigo_cliente, nova_assistente):
+def carregar_historico_titulo(cliente_id):
     with get_connection() as conn:
-        conn.execute('UPDATE clientes SET assistente_responsavel = ?, data_ultima_atualizacao = CURRENT_TIMESTAMP WHERE codigo_cliente = ?', (nova_assistente, codigo_cliente))
+        return pd.read_sql_query(
+            """
+            SELECT datetime(data_hora, 'localtime') AS data_hora, assistente, acao,
+                   status_anterior, status_novo, observacao
+            FROM historico_tratativas
+            WHERE cliente_id = ?
+            ORDER BY data_hora DESC
+            LIMIT 200
+            """,
+            conn,
+            params=(int(cliente_id),),
+        )
+
+def listar_auditoria_recente(limite=80):
+    with get_connection() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT datetime(data_hora, 'localtime') AS data_hora, tipo, usuario, detalhes
+            FROM auditoria_eventos
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(limite,),
+        )
+
+def transferir_cliente(codigo_cliente, nova_assistente, executado_por=None):
+    with get_connection() as conn:
+        cur = conn.execute(
+            "SELECT id, assistente_responsavel, status_tratativa FROM clientes WHERE codigo_cliente = ?",
+            (codigo_cliente.strip(),),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return False
+        conn.execute(
+            "UPDATE clientes SET assistente_responsavel = ?, data_ultima_atualizacao = CURRENT_TIMESTAMP WHERE codigo_cliente = ?",
+            (nova_assistente, codigo_cliente.strip()),
+        )
+        quem = executado_por or "Supervisor"
+        for cliente_id, assist_ant, status_atual in rows:
+            conn.execute(
+                """
+                INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
+                VALUES (?, ?, 'transferencia_assistente', ?, ?, ?)
+                """,
+                (
+                    cliente_id,
+                    quem,
+                    status_atual,
+                    status_atual,
+                    f"Assistente: {assist_ant} → {nova_assistente}",
+                ),
+            )
         conn.commit()
+    registrar_auditoria(
+        "transferencia_cliente",
+        executado_por,
+        f"codigo={codigo_cliente}; destino={nova_assistente}; titulos={len(rows)}",
+    )
     st.cache_data.clear()
     return True
 
@@ -524,39 +959,119 @@ if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
     st.session_state.usuario = None
     st.session_state.perfil = None
+    st.session_state.email = None
+    st.session_state.last_activity = None
 
 if not st.session_state.autenticado:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("""
-            <div class="login-container">
-                <h1 class="login-title">📊 Dashboard Financeiro</h1>
-                <h2 class="login-subtitle">Cobrança & Resultado</h2>
+            <div class="login-hero-card">
+                <h1 class="login-title">Dashboard Financeiro</h1>
+                <p class="login-subtitle">Cobrança e resultado — acesse com seu e-mail corporativo</p>
+            </div>
         """, unsafe_allow_html=True)
-        email = st.text_input("Email", key="login_email")
+        email = st.text_input("Usuário ou email", key="login_email", placeholder="wsdataanalyst ou nome@empresa.com")
         senha = st.text_input("Senha", type="password", key="login_senha")
         if st.button("Entrar", use_container_width=True):
             user = verificar_login(email, senha)
             if user:
+                nome, perfil, email_db = user
                 st.session_state.autenticado = True
-                st.session_state.usuario = user[0]
-                st.session_state.perfil = user[1]
+                st.session_state.usuario = nome
+                st.session_state.perfil = perfil
+                st.session_state.email = email_db
+                st.session_state.last_activity = time.time()
                 st.rerun()
             else:
                 st.error("Credenciais inválidas.")
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
+
+# ---------- Sessão (timeout) + feedbacks ----------
+agora = time.time()
+ult = st.session_state.get("last_activity")
+if ult is not None and (agora - ult > SESSAO_TIMEOUT_SEGUNDOS):
+    limpar_sessao_auth()
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.warning(
+        f"Sessão encerrada por inatividade (limite: {SESSAO_TIMEOUT_SEGUNDOS // 60} minutos sem uso). Faça login novamente."
+    )
+    st.stop()
+st.session_state.last_activity = agora
+
+if st.session_state.pop("flash_senha_ok", None):
+    st.success("Senha alterada com sucesso.")
+if st.session_state.pop("flash_atualizar_dados", None):
+    st.success("Caches atualizados — dados recarregados a partir do banco (não foi necessário sair).")
+
+if st.session_state.email and precisa_trocar_senha_mensal(st.session_state.email):
+    render_tela_trocar_senha(
+        st.session_state.email,
+        st.session_state.usuario,
+        obrigatoria_mes=True,
+    )
     st.stop()
 
 # ========== INTERFACE PRINCIPAL ==========
 st.sidebar.title(f"👤 {st.session_state.usuario}")
-st.sidebar.write(f"Perfil: **{st.session_state.perfil}**")
+st.sidebar.write(f"Perfil: **{PERFIS_LABEL.get(st.session_state.perfil, st.session_state.perfil)}**")
+
+# ---------- Desenvolvedor: alternar visões ----------
+perfil_real = st.session_state.perfil
+modo_visao_dev = "Supervisor"
+assistente_alvo = st.session_state.usuario
+
+if perfil_real == "desenvolvedor":
+    st.sidebar.markdown("---")
+    modo_visao_dev = st.sidebar.radio(
+        "Modo de visualização",
+        ["Supervisor", "Assistente"],
+        index=0,
+        help="Como Desenvolvedor, você pode alternar entre visão gerencial (Supervisor) e visão de operação (Assistente).",
+    )
+    if modo_visao_dev == "Assistente":
+        with get_connection() as conn:
+            df_assist = pd.read_sql_query(
+                "SELECT nome FROM usuarios WHERE perfil = 'assistente' ORDER BY nome",
+                conn,
+            )
+        opcoes = df_assist["nome"].tolist() if not df_assist.empty else []
+        if not opcoes:
+            st.sidebar.warning("Nenhuma assistente cadastrada para simular a visão.")
+        else:
+            assistente_alvo = st.sidebar.selectbox("Assistente (visão)", opcoes, index=0)
+
+is_visao_supervisor = (perfil_real in PERFIS_VISAO_GERAL) and (perfil_real != "desenvolvedor" or modo_visao_dev == "Supervisor")
+is_visao_assistente = (perfil_real == "assistente") or (perfil_real == "desenvolvedor" and modo_visao_dev == "Assistente")
 
 if st.sidebar.button("🚪 Sair", use_container_width=True):
+    limpar_sessao_auth()
     st.cache_data.clear()
-    st.session_state.autenticado = False
-    st.session_state.usuario = None
-    st.session_state.perfil = None
+    st.cache_resource.clear()
     st.rerun()
+
+if st.sidebar.button(
+    "🔄 Atualizar dados",
+    use_container_width=True,
+    help="Limpa o cache do app e relê o SQLite. Use após importar planilha ou restaurar backup, sem precisar sair.",
+):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.session_state["flash_atualizar_dados"] = True
+    st.rerun()
+
+if st.sidebar.button("🔑 Trocar senha", use_container_width=True):
+    st.session_state["_troca_senha_ui"] = True
+    st.rerun()
+
+if st.session_state.get("_troca_senha_ui"):
+    render_tela_trocar_senha(
+        st.session_state.email,
+        st.session_state.usuario,
+        obrigatoria_mes=False,
+    )
+    st.stop()
 
 # ---------- FILTRO DE ANO/MÊS ----------
 st.sidebar.markdown("---")
@@ -580,8 +1095,22 @@ else:
     data_inicio, data_fim = get_date_range_from_selection(int(ano_selecionado) if ano_selecionado != "Todos" else None, mes_selecionado)
 campo_db = "vencimento"
 
+if is_visao_assistente:
+    st.sidebar.markdown("---")
+    restringir_fila_periodo = st.sidebar.checkbox(
+        "Restringir minha fila ao período (vencimento)",
+        value=False,
+        help="Desligado (recomendado para operação): todos os títulos atribuídos entram na fila por atraso/status. Ligado: apenas títulos com vencimento no ano/mês escolhidos.",
+        key="restr_periodo_fila",
+    )
+else:
+    restringir_fila_periodo = True
+
+data_inicio_fila_assistente = data_inicio if restringir_fila_periodo else None
+data_fim_fila_assistente = data_fim if restringir_fila_periodo else None
+
 # Menu com contagem textual
-if st.session_state.perfil == "admin":
+if is_visao_supervisor:
     with get_connection() as conn:
         pendentes = pd.read_sql_query("SELECT COUNT(*) as qtd FROM solicitacoes_reabertura WHERE status = 'pendente'", conn)
         qtd_pendentes = pendentes.iloc[0]['qtd'] if not pendentes.empty else 0
@@ -594,11 +1123,13 @@ if st.session_state.perfil == "admin":
 else:
     menu = st.sidebar.radio("Menu", ["📋 Meus Clientes", "📊 Meu Dashboard"])
 
-# ========== ADMIN ==========
-if st.session_state.perfil == "admin":
+# ========== SUPERVISOR ==========
+if is_visao_supervisor:
     if menu.startswith("📤"):
         st.header("Upload da Planilha")
-        st.warning("⚠️ **Atenção:** Faça backup regularmente.")
+        if not backup_ok_recente():
+            exigir_backup_supervisor("Upload da Planilha")
+        st.info("Backup verificado. Você pode prosseguir com segurança.")
         modo_upload = st.radio("Modo de upload:", ["Atualizar base (recomendado)", "Substituir base (apaga tudo)"])
         arquivo = st.file_uploader("Selecione o arquivo Excel", type=["xlsx", "xls"])
         if arquivo:
@@ -642,8 +1173,24 @@ if st.session_state.perfil == "admin":
         df_ass = get_assistente_comparativo(data_inicio, data_fim, campo_db)
         if not df_ass.empty:
             df_ass['Taxa_Inadimplencia'] = (df_ass['clientes_em_atraso'] / df_ass['clientes_total'] * 100).fillna(0)
-            fig = px.bar(df_ass, x='assistente_responsavel', y='valor_total', text='clientes_em_atraso',
-                         color='Taxa_Inadimplencia', color_continuous_scale='RdYlGn_r')
+            fig = px.bar(
+                df_ass,
+                x='assistente_responsavel',
+                y='valor_total',
+                text='clientes_em_atraso',
+                color='Taxa_Inadimplencia',
+                color_continuous_scale=['#99f6e4', '#a5b4fc', '#c4b5fd', '#f0abfc', '#fb7185'],
+                labels={
+                    'assistente_responsavel': 'Assistente',
+                    'valor_total': 'Valor em aberto (R$)',
+                    'Taxa_Inadimplencia': 'Taxa inadimplência (%)',
+                    'clientes_em_atraso': 'Clientes em atraso',
+                },
+                title='Valor em aberto por assistente (cor = taxa de inadimplência)',
+            )
+            aplicar_tema_plotly(fig, altura=420)
+            fig.update_traces(textposition='outside', texttemplate='%{text}', marker_line_width=0, textfont_color='#f1f5f9')
+            fig.update_coloraxes(colorbar=dict(title=dict(text='% inad.', font=dict(color='#94a3b8')), tickfont=dict(color='#94a3b8')))
             st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("🔴 Top 10 Inadimplentes")
@@ -684,6 +1231,8 @@ if st.session_state.perfil == "admin":
 
     elif menu.startswith("📥"):
         st.header("Exportar Base Completa")
+        if not backup_ok_recente():
+            exigir_backup_supervisor("Exportar Base Completa")
         with get_connection() as conn:
             df_export = pd.read_sql_query("SELECT * FROM clientes ORDER BY assistente_responsavel, status_tratativa", conn)
         if df_export.empty:
@@ -697,12 +1246,16 @@ if st.session_state.perfil == "admin":
 
     elif menu.startswith("🔄 Transferir"):
         st.header("Transferir Cliente entre Assistentes")
+        if not backup_ok_recente():
+            exigir_backup_supervisor("Transferir Cliente")
         codigo = st.text_input("Código do Cliente")
         nova = st.selectbox("Nova Assistente", ["Jane Xavier", "Renata Kelly"])
         if st.button("Transferir"):
             if codigo:
-                transferir_cliente(codigo, nova)
-                st.success(f"Cliente {codigo} transferido para {nova}.")
+                if transferir_cliente(codigo, nova, st.session_state.usuario):
+                    st.success(f"Cliente {codigo} transferido para {nova}.")
+                else:
+                    st.warning("Código não encontrado.")
             else:
                 st.warning("Informe o código.")
 
@@ -711,14 +1264,21 @@ if st.session_state.perfil == "admin":
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Criar backup agora"):
-                path = create_backup()
+                path = create_backup_registrado(st.session_state.get("usuario"))
                 st.success(f"Backup: {path}")
                 with open(path, "rb") as f: st.download_button("📥 Baixar", f, file_name=os.path.basename(path))
         with col2:
             uploaded = st.file_uploader("Restaurar backup (.db)", type=["db"])
             if uploaded and st.button("Restaurar"):
-                if restore_backup(uploaded):
+                if restore_backup(uploaded, st.session_state.usuario):
                     st.success("Restaurado!"); st.rerun()
+        st.markdown("---")
+        st.subheader("📜 Auditoria recente")
+        df_aud = listar_auditoria_recente(100)
+        if df_aud.empty:
+            st.caption("Nenhum evento registrado ainda.")
+        else:
+            st.dataframe(df_aud, use_container_width=True, hide_index=True)
 
 # ========== ASSISTENTE ==========
 else:
@@ -735,34 +1295,34 @@ else:
             else:
                 st.sidebar.warning("Código não encontrado.")
 
-    df_clientes_total = carregar_clientes_assistente(st.session_state.usuario)
+    df_clientes_total = carregar_clientes_assistente(assistente_alvo)
 
     if menu == "📋 Meus Clientes":
-        st.header(f"Clientes de {st.session_state.usuario}")
+        st.header(f"Clientes de {assistente_alvo}")
+        if st.session_state.pop("flash_reabertura", None):
+            st.success(
+                "Solicitação de reabertura **registrada com sucesso**. "
+                "Ela aparecerá na fila do Supervisor para análise."
+            )
         if df_clientes_total.empty:
             st.info("Nenhum título atribuído.")
             st.stop()
 
-        df_clientes_filtrado = aplicar_filtro_periodo(df_clientes_total.copy(), campo_db, data_inicio, data_fim)
+        df_clientes_filtrado = aplicar_filtro_periodo(
+            df_clientes_total.copy(), campo_db, data_inicio_fila_assistente, data_fim_fila_assistente
+        )
 
-        st.subheader("📊 Status das Tratativas (Período)")
+        st.subheader("📊 Status das Tratativas (Período)" if restringir_fila_periodo else "📊 Status das Tratativas (todos os vencimentos)")
         status_list = list(STATUS_MAP.keys())
         cols = st.columns(len(status_list))
         if 'filtro_status' not in st.session_state: st.session_state.filtro_status = None
-        cores_card = {'pendente':'#6B7280','em_tratativa':'#2563EB','contatado_sem_exito':'#DC2626','acordo_finalizado':'#059669','acordo_pendente':'#D97706'}
 
         for i, status in enumerate(status_list):
             df_status = df_clientes_filtrado[df_clientes_filtrado['status_tratativa'] == status]
             qtd = len(df_status)
             valor = df_status['valor_atualizado'].sum()
             with cols[i]:
-                st.markdown(f"""
-                <div style="background-color:{cores_card[status]}; padding:15px; border-radius:15px; text-align:center; margin-bottom:5px;">
-                    <h4 style="color:white; margin:0;">{STATUS_MAP[status]}</h4>
-                    <h2 style="color:white; margin:5px 0;">{qtd}</h2>
-                    <p style="color:#FDE047; margin:0;">R$ {valor:,.2f}</p>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(render_status_card(status, qtd, valor), unsafe_allow_html=True)
                 if st.button("Filtrar", key=f"card_{status}"):
                     st.session_state.filtro_status = status
                     st.rerun()
@@ -787,7 +1347,11 @@ else:
 
             if codigo_sel:
                 with get_connection() as conn:
-                    titulos_df = pd.read_sql_query("SELECT * FROM clientes WHERE codigo_cliente = ? AND assistente_responsavel = ?", conn, params=(codigo_sel, st.session_state.usuario))
+                    titulos_df = pd.read_sql_query(
+                        "SELECT * FROM clientes WHERE codigo_cliente = ? AND assistente_responsavel = ?",
+                        conn,
+                        params=(codigo_sel, assistente_alvo),
+                    )
                 if titulos_df.empty:
                     st.error("Cliente não encontrado.")
                 else:
@@ -848,6 +1412,11 @@ else:
                                 if titulo['data_pagamento_programado']: st.write(f"**Pagamento Programado:** {titulo['data_pagamento_programado']}")
                                 if titulo['data_pagamento_realizado']: st.write(f"**Pagamento Realizado:** {titulo['data_pagamento_realizado']}")
 
+                            hist_df = carregar_historico_titulo(titulo['id'])
+                            if not hist_df.empty:
+                                st.markdown("**Histórico de interações neste título**")
+                                st.dataframe(hist_df, use_container_width=True, hide_index=True)
+
                             status_atual = titulo['status_tratativa']
                             if status_atual != 'acordo_finalizado':
                                 with st.form(f"form_edit_{titulo['id']}"):
@@ -876,8 +1445,11 @@ else:
                                     if st.form_submit_button("📩 Solicitar Reabertura"):
                                         if motivo_reab.strip():
                                             if criar_solicitacao_reabertura(titulo['id'], st.session_state.usuario, motivo_reab):
-                                                # MENSAGEM ALTERADA AQUI
-                                                st.success("Solicitação registrada. Aguarde aprovação do Administrador.")
+                                                st.session_state["flash_reabertura"] = True
+                                                try:
+                                                    st.toast("Solicitação registrada!", icon="✅")
+                                                except Exception:
+                                                    pass
                                                 st.rerun()
                                             else:
                                                 st.error("Erro ao enviar solicitação.")
@@ -890,7 +1462,9 @@ else:
         st.header("Meu Desempenho")
         if df_clientes_total.empty:
             st.info("Sem dados."); st.stop()
-        df_clientes_filtrado = aplicar_filtro_periodo(df_clientes_total.copy(), campo_db, data_inicio, data_fim)
+        df_clientes_filtrado = aplicar_filtro_periodo(
+            df_clientes_total.copy(), campo_db, data_inicio_fila_assistente, data_fim_fila_assistente
+        )
         metricas_global = get_dashboard_data(data_inicio, data_fim, campo_db)
         total_global = float(metricas_global['valor_total'])
         inad_global = float(metricas_global['valor_inadimplente'])
@@ -948,23 +1522,31 @@ else:
         st.subheader("📊 Status das Minhas Tratativas")
         status_list = list(STATUS_MAP.keys())
         cols = st.columns(len(status_list))
-        cores = {'pendente':'#6B7280','em_tratativa':'#2563EB','contatado_sem_exito':'#DC2626','acordo_finalizado':'#059669','acordo_pendente':'#D97706'}
         for i, status in enumerate(status_list):
             df_status = df_ass[df_ass['status_tratativa'] == status]
             with cols[i]:
-                st.markdown(f"""
-                <div style="background-color:{cores[status]}; padding:15px; border-radius:15px; text-align:center;">
-                    <h4 style="color:white; margin:0;">{STATUS_MAP[status]}</h4>
-                    <h2 style="color:white; margin:5px 0;">{len(df_status)}</h2>
-                    <p style="color:#FDE047; margin:0;">R$ {df_status['valor_atualizado'].sum():,.2f}</p>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(render_status_card(status, len(df_status), df_status['valor_atualizado'].sum()), unsafe_allow_html=True)
 
         st.subheader("Distribuição")
         status_counts = df_ass['status_tratativa'].value_counts().reset_index()
         status_counts.columns = ['Status', 'Quantidade']
         status_counts['Status'] = status_counts['Status'].map(STATUS_MAP)
-        fig = px.pie(status_counts, names='Status', values='Quantidade', hole=0.4)
+        fig = px.pie(
+            status_counts,
+            names='Status',
+            values='Quantidade',
+            hole=0.48,
+            title='Distribuição das tratativas',
+            color_discrete_sequence=['#64748b', '#6366f1', '#f87171', '#14b8a6', '#f59e0b'],
+        )
+        aplicar_tema_plotly(fig, altura=440)
+        fig.update_traces(
+            textposition='inside',
+            textinfo='percent+label',
+            textfont_size=12,
+            marker=dict(line=dict(color='rgba(11,15,20,0.85)', width=2)),
+        )
+        fig.update_layout(showlegend=False, margin=dict(t=56, b=32, l=32, r=32))
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("🔴 Meus Top 5 Inadimplentes")
@@ -972,4 +1554,4 @@ else:
         st.dataframe(top5, use_container_width=True)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Dashboard Financeiro v12.7")
+st.sidebar.caption(f"Dashboard v13.0 · Sessão: {SESSAO_TIMEOUT_SEGUNDOS // 60} min inativo")
