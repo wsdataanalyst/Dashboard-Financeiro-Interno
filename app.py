@@ -41,7 +41,8 @@ st.markdown("""
                     linear-gradient(165deg, #0b0f14 0%, #0f1419 40%, #0a0d12 100%) !important;
     }
     [data-testid="stHeader"] { background: rgba(11, 15, 20, 0.85) !important; backdrop-filter: blur(8px); border-bottom: 1px solid rgba(148, 163, 184, 0.08); }
-    .block-container { padding-top: 1.25rem !important; max-width: 1400px; }
+    /* Dá folga para o header fixo não "cortar" títulos no topo */
+    .block-container { padding-top: 4.25rem !important; max-width: 1400px; }
     .main .block-container { padding-left: 2rem; padding-right: 2rem; }
 
     h1 { font-size: 2.15rem !important; font-weight: 700 !important; letter-spacing: -0.03em !important; color: #f1f5f9 !important; }
@@ -1052,10 +1053,23 @@ if "autenticado" not in st.session_state:
 if not st.session_state.autenticado:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
+        # Ajuste de espaçamento apenas na tela de login (evita "corte" pelo header fixo)
+        st.markdown(
+            """
+            <style>
+              .main .block-container { padding-top: 5.75rem !important; }
+              .login-hero-card { margin-top: 0.75rem !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         st.markdown("""
             <div class="login-hero-card">
                 <h1 class="login-title">Dashboard Financeiro</h1>
-                <p class="login-subtitle">Cobrança e resultado — acesse com seu e-mail corporativo</p>
+                <p class="login-subtitle">Cobrança &amp; Resultado — acesse com login e senha.</p>
+                <p class="login-subtitle" style="margin-top:-0.75rem;font-size:0.9rem;">
+                    Ambiente protegido. Acesso restrito a usuários autorizados.
+                </p>
             </div>
         """, unsafe_allow_html=True)
         email = st.text_input("Usuário ou email", key="login_email", placeholder="wsdataanalyst ou nome@empresa.com")
