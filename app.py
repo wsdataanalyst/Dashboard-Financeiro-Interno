@@ -12,6 +12,8 @@ import shutil
 import os
 import time
 import re
+import json
+import tempfile
 from datetime import datetime, timedelta
 import plotly.express as px
 import bcrypt
@@ -28,13 +30,28 @@ PERFIS_LABEL = {
 
 PERFIS_VISAO_GERAL = {"supervisor", "desenvolvedor"}
 
+MAX_UPLOAD_MB_EXCEL = int(os.environ.get("MAX_UPLOAD_MB_EXCEL", "25"))
+MAX_UPLOAD_MB_DB = int(os.environ.get("MAX_UPLOAD_MB_DB", "50"))
+LOGIN_MAX_TENTATIVAS = int(os.environ.get("LOGIN_MAX_TENTATIVAS", "6"))
+LOGIN_JANELA_SEG = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
+LOGIN_COOLDOWN_SEG = int(os.environ.get("LOGIN_COOLDOWN_SECONDS", "120"))
+
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="Dashboard Financeiro", page_icon="💰", layout="wide")
 
 st.markdown("""
 <style>
+    :root{
+        --base-font-size: 18px;
+        --container-pad-top: 4.25rem;
+        --container-pad-x: 2rem;
+        --sidebar-width: 330px;
+        --metric-value-size: 1.65rem;
+        --metric-label-size: 0.78rem;
+    }
+
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
-    html, body, [class*="css"] { font-size: 18px; font-family: 'DM Sans', system-ui, sans-serif !important; }
+    html, body, [class*="css"] { font-size: var(--base-font-size); font-family: 'DM Sans', system-ui, sans-serif !important; }
     .stApp {
         background: radial-gradient(1200px 800px at 10% -10%, rgba(99, 102, 241, 0.12), transparent 55%),
                     radial-gradient(900px 600px at 100% 0%, rgba(56, 189, 248, 0.08), transparent 50%),
@@ -42,18 +59,18 @@ st.markdown("""
     }
     [data-testid="stHeader"] { background: rgba(11, 15, 20, 0.85) !important; backdrop-filter: blur(8px); border-bottom: 1px solid rgba(148, 163, 184, 0.08); }
     /* Dá folga para o header fixo não "cortar" títulos no topo */
-    .block-container { padding-top: 4.25rem !important; max-width: 1400px; }
-    .main .block-container { padding-left: 2rem; padding-right: 2rem; }
+    .block-container { padding-top: var(--container-pad-top) !important; max-width: 1400px; }
+    .main .block-container { padding-left: var(--container-pad-x); padding-right: var(--container-pad-x); }
 
     h1 { font-size: 2.15rem !important; font-weight: 700 !important; letter-spacing: -0.03em !important; color: #f1f5f9 !important; }
     h2 { font-size: 1.65rem !important; font-weight: 600 !important; color: #e2e8f0 !important; letter-spacing: -0.02em; }
     h3 { font-size: 1.35rem !important; font-weight: 600 !important; color: #cbd5e1 !important; }
 
     [data-testid="stMetricValue"] {
-        font-size: 1.65rem !important; font-weight: 600 !important; color: #f8fafc !important;
+        font-size: var(--metric-value-size) !important; font-weight: 600 !important; color: #f8fafc !important;
     }
     [data-testid="stMetricLabel"] {
-        font-size: 0.78rem !important; font-weight: 600 !important; color: #94a3b8 !important;
+        font-size: var(--metric-label-size) !important; font-weight: 600 !important; color: #94a3b8 !important;
         text-transform: uppercase; letter-spacing: 0.06em !important;
     }
     [data-testid="stMetricDelta"] { font-size: 0.85rem !important; }
@@ -75,9 +92,9 @@ st.markdown("""
 
     /* Sidebar: manter largura confortável (sem espremer) */
     section[data-testid="stSidebar"] {
-        width: 330px !important;
-        min-width: 330px !important;
-        max-width: 330px !important;
+        width: var(--sidebar-width) !important;
+        min-width: var(--sidebar-width) !important;
+        max-width: var(--sidebar-width) !important;
     }
     /* Conteúdo da sidebar não estourar */
     section[data-testid="stSidebar"] .block-container {
@@ -95,6 +112,20 @@ st.markdown("""
     section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span {
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+
+    /* Auto-responsivo (quando usuário escolhe "Auto") */
+    @media (max-width: 1024px) {
+        :root { --container-pad-x: 1.25rem; --sidebar-width: 305px; }
+    }
+    @media (max-width: 768px) {
+        :root { --base-font-size: 16px; --container-pad-x: 1rem; --sidebar-width: 285px; --metric-value-size: 1.35rem; --metric-label-size: 0.72rem; }
+        .block-container { max-width: 100% !important; }
+    }
+    @media (max-width: 480px) {
+        :root { --base-font-size: 15.5px; --container-pad-x: 0.85rem; --metric-value-size: 1.25rem; }
+        h1 { font-size: 1.85rem !important; }
+        h2 { font-size: 1.35rem !important; }
     }
 
     .stButton > button {
@@ -160,6 +191,52 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+def _inject_device_profile_css(profile: str):
+    """Aplica overrides de layout para diferentes dispositivos."""
+    profile = (profile or "Auto").strip()
+    if profile == "Auto":
+        return
+    presets = {
+        "Smartphone": {
+            "--base-font-size": "15.5px",
+            "--container-pad-x": "0.85rem",
+            "--container-pad-top": "4.75rem",
+            "--sidebar-width": "285px",
+            "--metric-value-size": "1.25rem",
+            "--metric-label-size": "0.72rem",
+        },
+        "Tablet / iPad": {
+            "--base-font-size": "16.8px",
+            "--container-pad-x": "1.25rem",
+            "--container-pad-top": "4.75rem",
+            "--sidebar-width": "305px",
+            "--metric-value-size": "1.45rem",
+            "--metric-label-size": "0.75rem",
+        },
+        "Notebook / PC": {
+            "--base-font-size": "18px",
+            "--container-pad-x": "2rem",
+            "--container-pad-top": "4.25rem",
+            "--sidebar-width": "330px",
+            "--metric-value-size": "1.65rem",
+            "--metric-label-size": "0.78rem",
+        },
+    }
+    vars_map = presets.get(profile)
+    if not vars_map:
+        return
+    css_vars = "\n".join([f"      {k}: {v};" for k, v in vars_map.items()])
+    st.markdown(
+        f"""
+        <style>
+          :root {{
+{css_vars}
+          }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 TAXA_JUROS_DIARIO = 0.002
 TAXA_JUROS_MENSAL = 0.06
@@ -437,21 +514,50 @@ def init_db():
 
 
 def criar_usuarios_iniciais():
-    usuarios = [
-        ("Edvanisson Muniz", "edvanison@empresa.com", "@admin123", "supervisor"),
-        ("Jane Xavier", "jane@empresa.com", "@jane123", "assistente"),
-        ("Renata Kelly", "renata@empresa.com", "@renata123", "assistente"),
-        ("WS Data Analyst", "wsdataanalyst", "Alterar@1234", "desenvolvedor"),
-    ]
+    """
+    Bootstrap de usuários sem senhas hardcoded.
+
+    Espera configuração via `st.secrets["BOOTSTRAP_USERS_JSON"]` (string JSON)
+    ou `st.secrets["BOOTSTRAP_USERS"]` (lista de dicts).
+
+    Exemplo:
+      [{"nome":"Admin","email":"admin@empresa.com","senha":"...","perfil":"supervisor"}]
+    """
     hoje = datetime.now().strftime("%Y-%m-%d")
+
+    def _load_bootstrap_users():
+        try:
+            if "BOOTSTRAP_USERS" in st.secrets:
+                return list(st.secrets["BOOTSTRAP_USERS"])
+            if "BOOTSTRAP_USERS_JSON" in st.secrets:
+                return json.loads(st.secrets["BOOTSTRAP_USERS_JSON"])
+        except Exception:
+            return []
+        return []
+
+    usuarios = _load_bootstrap_users()
+    if not usuarios:
+        # Não cria usuários sem configuração explícita.
+        return
+
     with get_connection() as conn:
-        for nome, email, senha, perfil in usuarios:
-            em = email.strip().lower()
-            cur = conn.execute("SELECT id FROM usuarios WHERE email = ?", (em,))
+        for u in usuarios:
+            try:
+                nome = (u.get("nome") or "").strip()
+                email = (u.get("email") or "").strip().lower()
+                senha = (u.get("senha") or "").strip()
+                perfil = (u.get("perfil") or "").strip().lower()
+            except Exception:
+                continue
+            if not (nome and email and senha and perfil):
+                continue
+            if perfil not in PERFIS_LABEL:
+                continue
+            cur = conn.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
             if cur.fetchone() is None:
                 conn.execute(
                     "INSERT INTO usuarios (nome, email, senha_hash, perfil, ultima_troca_senha) VALUES (?, ?, ?, ?, ?)",
-                    (nome, em, hash_password(senha), perfil, "2000-01-01" if em == "wsdataanalyst" else hoje),
+                    (nome, email, hash_password(senha), perfil, hoje),
                 )
         conn.commit()
 
@@ -460,6 +566,17 @@ def verificar_login(email, senha):
     em = (email or "").strip().lower()
     if not em:
         return None
+    # Rate limit simples por sessão
+    now = time.time()
+    lock_until = float(st.session_state.get("login_lock_until", 0) or 0)
+    if lock_until and now < lock_until:
+        restante = int(lock_until - now)
+        st.error(f"Muitas tentativas. Aguarde {restante}s e tente novamente.")
+        return None
+    attempts = st.session_state.get("login_attempts", [])
+    attempts = [t for t in attempts if (now - float(t)) <= LOGIN_JANELA_SEG]
+    st.session_state["login_attempts"] = attempts
+
     def _get_user_row(email_key: str):
         with get_connection() as conn:
             return conn.execute(
@@ -478,6 +595,13 @@ def verificar_login(email, senha):
     nome, perfil, stored_hash, email_db = row
     ok, migrar = verificar_hash_armazenado(senha, stored_hash)
     if not ok:
+        attempts.append(now)
+        st.session_state["login_attempts"] = attempts
+        if len(attempts) >= LOGIN_MAX_TENTATIVAS:
+            st.session_state["login_lock_until"] = now + LOGIN_COOLDOWN_SEG
+            registrar_auditoria("login_bloqueado", em, f"tentativas={len(attempts)}; janela={LOGIN_JANELA_SEG}s")
+        else:
+            registrar_auditoria("login_falha", em, f"tentativas={len(attempts)}; janela={LOGIN_JANELA_SEG}s")
         return None
     if migrar:
         with get_connection() as conn:
@@ -487,6 +611,10 @@ def verificar_login(email, senha):
             )
             conn.commit()
         st.cache_data.clear()
+    # sucesso: limpa tentativas
+    st.session_state["login_attempts"] = []
+    st.session_state["login_lock_until"] = 0
+    registrar_auditoria("login_ok", em, f"perfil={perfil}")
     return nome, perfil, email_db
 
 def create_backup():
@@ -539,8 +667,86 @@ def registrar_auditoria(tipo, usuario, detalhes=""):
     except Exception:
         pass
 
+
+def _require_profile(required: set, titulo: str):
+    perfil = st.session_state.get("perfil")
+    if perfil not in required:
+        st.error(f"Ação restrita. Apenas: {', '.join(sorted(required))}.")
+        registrar_auditoria("acesso_negado", st.session_state.get("usuario"), f"acao={titulo}; perfil={perfil}")
+        st.stop()
+
+
+def _require_reauth(titulo: str):
+    """
+    Reautenticação simples: pede senha atual para ações críticas.
+    """
+    safe_key = re.sub(r"[^a-zA-Z0-9_]+", "_", (titulo or "acao")).strip("_").lower()
+    st.warning(f"Confirmação necessária: **{titulo}**")
+    email = st.session_state.get("email")
+    if not email:
+        st.error("Sessão inválida. Faça login novamente.")
+        st.stop()
+    with st.form(f"reauth_{safe_key}"):
+        senha = st.text_input("Digite sua senha para confirmar", type="password")
+        ok = st.form_submit_button("Confirmar", use_container_width=True)
+    if not ok:
+        st.stop()
+    if not verificar_senha_usuario(email, senha):
+        registrar_auditoria("reauth_falha", st.session_state.get("usuario"), f"acao={titulo}")
+        st.error("Senha incorreta. Operação cancelada.")
+        st.stop()
+    registrar_auditoria("reauth_ok", st.session_state.get("usuario"), f"acao={titulo}")
+
+
+def _uploaded_size_mb(uploaded_file) -> float:
+    try:
+        sz = getattr(uploaded_file, "size", None)
+        if sz is None and hasattr(uploaded_file, "getbuffer"):
+            sz = len(uploaded_file.getbuffer())
+        if not sz:
+            return 0.0
+        return float(sz) / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+def _validate_sqlite_backup_file(uploaded_file) -> tuple[bool, str]:
+    """
+    Valida se o upload parece um SQLite válido e contém tabelas esperadas.
+    """
+    required_tables = {"usuarios", "clientes"}
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp.write(uploaded_file.getbuffer())
+            tmp_path = tmp.name
+        try:
+            con = sqlite3.connect(tmp_path)
+            try:
+                rows = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                tables = {r[0] for r in rows}
+                missing = required_tables - tables
+                if missing:
+                    return False, f"Backup inválido: faltam tabelas {', '.join(sorted(missing))}."
+                return True, "OK"
+            finally:
+                con.close()
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        return False, "Backup inválido ou corrompido."
+
 def restore_backup(uploaded_file, usuario=None):
     try:
+        if _uploaded_size_mb(uploaded_file) > MAX_UPLOAD_MB_DB:
+            st.error(f"Arquivo de backup muito grande (limite {MAX_UPLOAD_MB_DB} MB).")
+            return False
+        ok, msg = _validate_sqlite_backup_file(uploaded_file)
+        if not ok:
+            st.error(msg)
+            return False
         create_backup_registrado(usuario)
         with open(DB_PATH, 'wb') as f:
             f.write(uploaded_file.getbuffer())
@@ -554,6 +760,9 @@ def restore_backup(uploaded_file, usuario=None):
 
 def processar_upload_excel(arquivo, modo="atualizar"):
     try:
+        if _uploaded_size_mb(arquivo) > MAX_UPLOAD_MB_EXCEL:
+            st.error(f"Arquivo Excel muito grande (limite {MAX_UPLOAD_MB_EXCEL} MB).")
+            return None
         xl = pd.ExcelFile(arquivo)
         abas = xl.sheet_names
     except Exception as e:
@@ -570,6 +779,10 @@ def processar_upload_excel(arquivo, modo="atualizar"):
         st.error(f"Erro ao ler a aba '{aba_selecionada}': {e}")
         return None
     df = df.dropna(how='all')
+    # Proteção básica: limita volume (evita travar o app por planilhas gigantes)
+    if len(df) > 200_000:
+        st.error("Planilha muito grande (limite: 200.000 linhas).")
+        return None
     def normalizar_texto(texto):
         if not isinstance(texto, str): return ""
         texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
@@ -1118,6 +1331,20 @@ if st.session_state.email and precisa_trocar_senha_mensal(st.session_state.email
 st.sidebar.title(f"👤 {st.session_state.usuario}")
 st.sidebar.write(f"Perfil: **{PERFIS_LABEL.get(st.session_state.perfil, st.session_state.perfil)}**")
 
+# ---------- Layout (responsivo / dispositivos) ----------
+if "device_profile" not in st.session_state:
+    st.session_state.device_profile = "Auto"
+st.sidebar.markdown("---")
+st.session_state.device_profile = st.sidebar.selectbox(
+    "📱 Layout do dispositivo",
+    ["Auto", "Smartphone", "Tablet / iPad", "Notebook / PC"],
+    index=["Auto", "Smartphone", "Tablet / iPad", "Notebook / PC"].index(st.session_state.device_profile)
+    if st.session_state.device_profile in ["Auto", "Smartphone", "Tablet / iPad", "Notebook / PC"]
+    else 0,
+    help="Ajusta tamanhos e espaçamentos para melhorar a usabilidade em diferentes dispositivos.",
+)
+_inject_device_profile_css(st.session_state.device_profile)
+
 # ---------- Desenvolvedor: alternar visões ----------
 perfil_real = st.session_state.perfil
 modo_visao_dev = "Supervisor"
@@ -1228,6 +1455,8 @@ else:
 if is_visao_supervisor:
     if menu.startswith("📤"):
         st.header("Upload da Planilha")
+        _require_profile({"supervisor", "desenvolvedor"}, "Upload da Planilha")
+        _require_reauth("Upload da Planilha")
         if not backup_ok_recente():
             exigir_backup_supervisor("Upload da Planilha")
         st.info("Backup verificado. Você pode prosseguir com segurança.")
@@ -1340,6 +1569,8 @@ if is_visao_supervisor:
 
     elif menu.startswith("📥"):
         st.header("Exportar Base Completa")
+        _require_profile({"supervisor", "desenvolvedor"}, "Exportar Base Completa")
+        _require_reauth("Exportar Base Completa")
         if not backup_ok_recente():
             exigir_backup_supervisor("Exportar Base Completa")
         with get_connection() as conn:
@@ -1355,6 +1586,8 @@ if is_visao_supervisor:
 
     elif menu.startswith("🔄 Transferir"):
         st.header("Transferir Cliente entre Assistentes")
+        _require_profile({"supervisor", "desenvolvedor"}, "Transferir Cliente")
+        _require_reauth("Transferir Cliente")
         if not backup_ok_recente():
             exigir_backup_supervisor("Transferir Cliente")
         codigo = st.text_input("Código do Cliente")
@@ -1370,15 +1603,18 @@ if is_visao_supervisor:
 
     elif menu.startswith("💾"):
         st.header("Gerenciamento de Backup")
+        _require_profile({"supervisor", "desenvolvedor"}, "Backup/Restore")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Criar backup agora"):
+                _require_reauth("Criar backup")
                 path = create_backup_registrado(st.session_state.get("usuario"))
                 st.success(f"Backup: {path}")
                 with open(path, "rb") as f: st.download_button("📥 Baixar", f, file_name=os.path.basename(path))
         with col2:
             uploaded = st.file_uploader("Restaurar backup (.db)", type=["db"])
             if uploaded and st.button("Restaurar"):
+                _require_reauth("Restaurar backup")
                 if restore_backup(uploaded, st.session_state.usuario):
                     st.success("Restaurado!"); st.rerun()
         st.markdown("---")
