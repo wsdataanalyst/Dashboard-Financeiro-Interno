@@ -781,29 +781,92 @@ def aplicar_filtro_periodo(df, campo_data, data_inicio, data_fim):
 def is_inadimplente(row):
     return row['tempo_atraso'] > 0 and row['status_tratativa'] != 'acordo_finalizado'
 
+def _get_clientes_colunas(conn) -> set:
+    try:
+        cur = conn.execute("PRAGMA table_info(clientes)")
+        return {row[1] for row in cur.fetchall()}
+    except Exception:
+        return set()
+
+def _read_clientes_df(conn, data_inicio=None, data_fim=None, campo_filtro="vencimento") -> pd.DataFrame:
+    """
+    Lê dados de `clientes` garantindo que a coluna `valor_atualizado` exista no DataFrame.
+    Isso evita quebra em bases legadas / migrações parciais (ex.: Streamlit Cloud).
+    """
+    cols = _get_clientes_colunas(conn)
+    base_cols = {"tempo_atraso", "vencimento", "emissao", "status_tratativa"}
+
+    if "valor_atualizado" in cols:
+        select_cols = ["valor_atualizado", *sorted(base_cols)]
+        df = pd.read_sql_query(
+            f"SELECT {', '.join(select_cols)} FROM clientes",
+            conn,
+        )
+    else:
+        # Base legada: calcula "valor_atualizado" a partir de valor_original + juros (quando existir).
+        select_cols = []
+        if "valor_original" in cols:
+            select_cols.append("valor_original")
+        if "juros" in cols:
+            select_cols.append("juros")
+        # mantém colunas usadas na UI/metricas quando existirem
+        for c in sorted(base_cols):
+            if c in cols:
+                select_cols.append(c)
+        if not select_cols:
+            df = pd.DataFrame(columns=["valor_atualizado", *sorted(base_cols)])
+        else:
+            df = pd.read_sql_query(
+                f"SELECT {', '.join(select_cols)} FROM clientes",
+                conn,
+            )
+        valor_original = pd.to_numeric(df.get("valor_original", 0), errors="coerce").fillna(0)
+        juros = pd.to_numeric(df.get("juros", 0), errors="coerce").fillna(0)
+        df["valor_atualizado"] = valor_original + juros
+
+    df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
+    return df
+
 @st.cache_data(ttl=300)
 def get_dashboard_data(data_inicio=None, data_fim=None, campo_filtro="vencimento"):
     with get_connection() as conn:
-        df = pd.read_sql_query('SELECT valor_atualizado, tempo_atraso, vencimento, emissao, status_tratativa FROM clientes', conn)
-    df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
+        df = _read_clientes_df(conn, data_inicio=data_inicio, data_fim=data_fim, campo_filtro=campo_filtro)
     total_titulos = len(df)
-    valor_total = df['valor_atualizado'].sum()
-    df_inad = df[df.apply(is_inadimplente, axis=1)]
-    valor_inadimplente = df_inad['valor_atualizado'].sum()
+    if "valor_atualizado" not in df.columns:
+        df["valor_atualizado"] = 0.0
+    valor_total = pd.to_numeric(df["valor_atualizado"], errors="coerce").fillna(0).sum()
+    df_inad = df[df.apply(is_inadimplente, axis=1)] if not df.empty else df
+    valor_inadimplente = pd.to_numeric(df_inad.get("valor_atualizado", 0), errors="coerce").fillna(0).sum()
     return pd.Series({'total_titulos': total_titulos, 'valor_total': valor_total, 'valor_inadimplente': valor_inadimplente, 'df_inad': df_inad})
 
 @st.cache_data(ttl=300)
 def get_status_counts(data_inicio=None, data_fim=None, campo_filtro="vencimento"):
     with get_connection() as conn:
-        df = pd.read_sql_query('SELECT status_tratativa, valor_atualizado, vencimento, emissao FROM clientes', conn)
-    df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
+        df = _read_clientes_df(conn, data_inicio=data_inicio, data_fim=data_fim, campo_filtro=campo_filtro)
+    if "status_tratativa" not in df.columns:
+        df["status_tratativa"] = "pendente"
     return df.groupby('status_tratativa').agg(qtd=('status_tratativa', 'count'), total=('valor_atualizado', 'sum')).reset_index()
 
 @st.cache_data(ttl=300)
 def get_assistente_comparativo(data_inicio=None, data_fim=None, campo_filtro="vencimento"):
     with get_connection() as conn:
-        df = pd.read_sql_query('SELECT assistente_responsavel, valor_atualizado, tempo_atraso, vencimento, emissao, status_tratativa FROM clientes', conn)
-    df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
+        # Lê o mesmo núcleo e traz assistente_responsavel quando existir.
+        cols = _get_clientes_colunas(conn)
+        if "assistente_responsavel" in cols:
+            df = pd.read_sql_query(
+                "SELECT assistente_responsavel, tempo_atraso, vencimento, emissao, status_tratativa, "
+                + ("valor_atualizado" if "valor_atualizado" in cols else "valor_original, juros")
+                + " FROM clientes",
+                conn,
+            )
+            if "valor_atualizado" not in df.columns:
+                valor_original = pd.to_numeric(df.get("valor_original", 0), errors="coerce").fillna(0)
+                juros = pd.to_numeric(df.get("juros", 0), errors="coerce").fillna(0)
+                df["valor_atualizado"] = valor_original + juros
+            df = aplicar_filtro_periodo(df, campo_filtro, data_inicio, data_fim)
+        else:
+            df = _read_clientes_df(conn, data_inicio=data_inicio, data_fim=data_fim, campo_filtro=campo_filtro)
+            df["assistente_responsavel"] = "N/D"
     df['inad'] = df.apply(is_inadimplente, axis=1)
     return df.groupby('assistente_responsavel').agg(valor_total=('valor_atualizado', 'sum'), clientes_em_atraso=('inad', 'sum'), clientes_total=('assistente_responsavel', 'count')).reset_index()
 
