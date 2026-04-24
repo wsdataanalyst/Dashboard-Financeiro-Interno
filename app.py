@@ -72,6 +72,30 @@ st.markdown("""
     section[data-testid="stSidebar"] .stMarkdown strong { color: #c7d2fe !important; }
     section[data-testid="stSidebar"] label { color: #cbd5e1 !important; }
 
+    /* Sidebar: manter largura confortável (sem espremer) */
+    section[data-testid="stSidebar"] {
+        width: 330px !important;
+        min-width: 330px !important;
+        max-width: 330px !important;
+    }
+    /* Conteúdo da sidebar não estourar */
+    section[data-testid="stSidebar"] .block-container {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+    /* Evita quebra agressiva nos textos/labels do menu */
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] span {
+        white-space: nowrap;
+    }
+    /* Se algum texto for longo demais, corta com reticências em vez de esmagar */
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
     .stButton > button {
         font-size: 1rem !important; font-weight: 600 !important; padding: 0.55rem 1.1rem !important;
         border-radius: 10px !important; border: none !important;
