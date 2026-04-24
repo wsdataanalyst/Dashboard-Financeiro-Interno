@@ -1227,10 +1227,18 @@ if is_visao_supervisor:
 
         st.subheader("📈 Status das Tratativas (Global)")
         df_status = get_status_counts(data_inicio, data_fim, campo_db)
-        cols = st.columns(len(df_status))
-        for i, (_, row) in enumerate(df_status.iterrows()):
-            status = row['status_tratativa']
-            with cols[i]: st.metric(STATUS_MAP.get(status, status), f"{row['qtd']} títulos", f"R$ {row['total']:,.2f}")
+        if df_status is None or df_status.empty:
+            st.info("Sem dados de status para o período selecionado.")
+        else:
+            cols = st.columns(max(1, len(df_status)))
+            for i, (_, row) in enumerate(df_status.iterrows()):
+                status = row['status_tratativa']
+                with cols[i]:
+                    st.metric(
+                        STATUS_MAP.get(status, status),
+                        f"{row['qtd']} títulos",
+                        f"R$ {row['total']:,.2f}",
+                    )
 
         st.subheader("📊 Análise Comparativa por Assistente")
         df_ass = get_assistente_comparativo(data_inicio, data_fim, campo_db)
