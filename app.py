@@ -172,6 +172,116 @@ st.markdown("""
 
     div[data-testid="stRadio"] label { color: #e2e8f0 !important; }
 
+    /* KPI cards (dashboard) */
+    .kpi-grid{
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 14px;
+        margin: 0.75rem 0 1.15rem 0;
+    }
+    .kpi-card{
+        grid-column: span 3;
+        padding: 14px 14px 12px 14px;
+        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        background: linear-gradient(155deg, rgba(51, 65, 85, 0.35) 0%, rgba(15, 23, 42, 0.78) 100%);
+        box-shadow: 0 18px 40px rgba(0,0,0,0.28);
+        position: relative;
+        overflow: hidden;
+        min-height: 92px;
+    }
+    .kpi-card::before{
+        content:"";
+        position:absolute;
+        inset:-2px;
+        background: radial-gradient(420px 160px at 20% 0%, rgba(99,102,241,0.20), transparent 55%),
+                    radial-gradient(360px 140px at 85% -10%, rgba(56,189,248,0.14), transparent 58%);
+        pointer-events:none;
+    }
+    .kpi-top{
+        display:flex;
+        align-items:flex-start;
+        justify-content:space-between;
+        gap:12px;
+        position:relative;
+        z-index:1;
+    }
+    .kpi-label{
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgba(148, 163, 184, 0.95);
+        margin: 0;
+        line-height: 1.15;
+    }
+    .kpi-value{
+        margin: 8px 0 0 0;
+        font-size: 1.55rem;
+        font-weight: 750;
+        letter-spacing: -0.02em;
+        color: #f8fafc;
+        line-height: 1.15;
+        position:relative;
+        z-index:1;
+    }
+    .kpi-sub{
+        margin: 6px 0 0 0;
+        font-size: 0.92rem;
+        font-weight: 600;
+        color: rgba(226, 232, 240, 0.78);
+        position:relative;
+        z-index:1;
+    }
+    .kpi-icon{
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-size: 1.15rem;
+        color: #fff;
+        background: rgba(99, 102, 241, 0.18);
+        border: 1px solid rgba(129, 140, 248, 0.22);
+        position:relative;
+        z-index:1;
+        flex: 0 0 auto;
+    }
+    .kpi-badge{
+        display:inline-flex;
+        align-items:center;
+        gap:8px;
+        margin-top: 10px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        font-weight: 650;
+        color: rgba(226, 232, 240, 0.92);
+        background: rgba(2, 6, 23, 0.35);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        position:relative;
+        z-index:1;
+        width: fit-content;
+    }
+    .kpi-badge-dot{
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(99,102,241,0.9);
+        box-shadow: 0 0 0 3px rgba(99,102,241,0.18);
+    }
+    .kpi-card[data-tone="ok"] .kpi-icon{ background: rgba(20,184,166,0.18); border-color: rgba(45,212,191,0.22); }
+    .kpi-card[data-tone="ok"] .kpi-badge-dot{ background: rgba(20,184,166,0.95); box-shadow: 0 0 0 3px rgba(20,184,166,0.18); }
+    .kpi-card[data-tone="warn"] .kpi-icon{ background: rgba(245,158,11,0.18); border-color: rgba(251,191,36,0.22); }
+    .kpi-card[data-tone="warn"] .kpi-badge-dot{ background: rgba(245,158,11,0.95); box-shadow: 0 0 0 3px rgba(245,158,11,0.18); }
+    .kpi-card[data-tone="danger"] .kpi-icon{ background: rgba(239,68,68,0.18); border-color: rgba(248,113,113,0.22); }
+    .kpi-card[data-tone="danger"] .kpi-badge-dot{ background: rgba(239,68,68,0.95); box-shadow: 0 0 0 3px rgba(239,68,68,0.18); }
+
+    @media (max-width: 1024px){ .kpi-card{ grid-column: span 4; } }
+    @media (max-width: 768px){ .kpi-card{ grid-column: span 6; } .kpi-value{ font-size: 1.35rem; } }
+    @media (max-width: 480px){ .kpi-card{ grid-column: span 12; } }
+
     /* Login — bloco visual (campos ficam abaixo; Streamlit não aninha widgets no HTML) */
     .login-hero-card {
         width: 100%; max-width: 420px; margin: 0 auto 1.5rem; padding: 2rem 1.75rem;
@@ -192,6 +302,48 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+def _fmt_brl(v: float) -> str:
+    try:
+        return f"R$ {float(v):,.2f}"
+    except Exception:
+        return "R$ 0,00"
+
+
+def _fmt_int(v) -> str:
+    try:
+        return f"{int(v):,}".replace(",", ".")
+    except Exception:
+        return "0"
+
+
+def render_kpi_card(label: str, value: str, subtitle: str = "", icon: str = "📌", badge: str = "", tone: str = "default"):
+    label_html = (label or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    value_html = (value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    subtitle_html = (subtitle or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    badge_html = (badge or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    icon_html = (icon or "📌").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    badge_block = ""
+    if badge_html:
+        badge_block = f'<div class="kpi-badge"><span class="kpi-badge-dot"></span><span>{badge_html}</span></div>'
+    sub_block = f'<p class="kpi-sub">{subtitle_html}</p>' if subtitle_html else ""
+    return f"""
+      <div class="kpi-card" data-tone="{tone}">
+        <div class="kpi-top">
+          <div>
+            <p class="kpi-label">{label_html}</p>
+            <p class="kpi-value">{value_html}</p>
+            {sub_block}
+            {badge_block}
+          </div>
+          <div class="kpi-icon">{icon_html}</div>
+        </div>
+      </div>
+    """
+
+
+def render_kpi_grid(cards_html: list[str]) -> str:
+    return f'<div class="kpi-grid">{"".join(cards_html)}</div>'
 
 def _inject_device_profile_css(profile: str):
     """Aplica overrides de layout para diferentes dispositivos."""
@@ -1501,35 +1653,47 @@ if is_visao_supervisor:
         total_valor = float(metricas['valor_total'])
         inad_valor = float(metricas['valor_inadimplente'])
         percent_inad = (inad_valor / total_valor * 100) if total_valor else 0
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total de Títulos", total_clientes)
-        col2.metric("Valor Total em Aberto", f"R$ {total_valor:,.2f}")
-        col3.metric("Inadimplência (%)", f"{percent_inad:.2f}%", delta=f"{percent_inad-3:.2f} p.p." if percent_inad > 3 else "✅ Dentro da meta")
+        tone_inad = "ok" if percent_inad <= 3 else ("warn" if percent_inad <= 6 else "danger")
+        badge_inad = "Dentro da meta (≤ 3%)" if percent_inad <= 3 else f"Acima da meta (+{percent_inad-3:.2f} p.p.)"
+        kpis = [
+            render_kpi_card("Total de títulos", _fmt_int(total_clientes), "Base no período selecionado", icon="🧾", tone="default"),
+            render_kpi_card("Valor em aberto", _fmt_brl(total_valor), "Soma do valor atualizado", icon="💰", tone="default"),
+            render_kpi_card("Inadimplência", f"{percent_inad:.2f}%", "Percentual do valor em atraso", icon="📉", badge=badge_inad, tone=tone_inad),
+            render_kpi_card("Valor inadimplente", _fmt_brl(inad_valor), "Somente títulos em atraso", icon="🚨", tone=tone_inad),
+        ]
+        st.markdown(render_kpi_grid(kpis), unsafe_allow_html=True)
 
         st.subheader("📅 Acordos")
-        col_a, col_b, col_c = st.columns(3)
         qtd_ontem, val_ontem = get_acordos_ontem()
-        with col_a: st.metric("Acordos Fechados Ontem", f"{qtd_ontem} títulos", f"R$ {val_ontem:,.2f}")
         qtd_hoje, val_hoje = get_acordos_hoje()
-        with col_b: st.metric("Acordos Programados Hoje", f"{qtd_hoje} títulos", f"R$ {val_hoje:,.2f}")
         qtd_fut, val_fut = get_acordos_futuros()
-        with col_c: st.metric("Acordos Programados Futuros", f"{qtd_fut} títulos", f"R$ {val_fut:,.2f}")
+        kpis_acordos = [
+            render_kpi_card("Acordos ontem", _fmt_int(qtd_ontem), _fmt_brl(val_ontem), icon="✅", tone="ok"),
+            render_kpi_card("Acordos hoje", _fmt_int(qtd_hoje), _fmt_brl(val_hoje), icon="📅", tone="warn" if qtd_hoje else "default"),
+            render_kpi_card("Acordos futuros", _fmt_int(qtd_fut), _fmt_brl(val_fut), icon="⏭️", tone="default"),
+            render_kpi_card("Ação sugerida", "Revisar hoje", "Se houver acordos para hoje, priorize tratativas", icon="🧭", tone="default"),
+        ]
+        st.markdown(render_kpi_grid(kpis_acordos), unsafe_allow_html=True)
 
         st.subheader("📈 Status das Tratativas (Global)")
         df_status = get_status_counts(data_inicio, data_fim, campo_db)
         if df_status is None or df_status.empty:
             st.info("Sem dados de status para o período selecionado.")
         else:
-            cols = st.columns(max(1, len(df_status)))
-            for i, (_, row) in enumerate(df_status.iterrows()):
+            cards_status = []
+            for _, row in df_status.iterrows():
                 status = row['status_tratativa']
-                with cols[i]:
-                    st.metric(
-                        STATUS_MAP.get(status, status),
-                        f"{row['qtd']} títulos",
-                        f"R$ {row['total']:,.2f}",
+                label = STATUS_MAP.get(status, status)
+                cards_status.append(
+                    render_kpi_card(
+                        label,
+                        _fmt_int(row["qtd"]),
+                        _fmt_brl(row["total"]),
+                        icon="📌",
+                        tone="default",
                     )
+                )
+            st.markdown(render_kpi_grid(cards_status), unsafe_allow_html=True)
 
         st.subheader("📊 Análise Comparativa por Assistente")
         df_ass = get_assistente_comparativo(data_inicio, data_fim, campo_db)
@@ -1838,7 +2002,8 @@ else:
         total_global = float(metricas_global['valor_total'])
         inad_global = float(metricas_global['valor_inadimplente'])
         percent_global = (inad_global / total_global * 100) if total_global else 0
-        st.metric("🌍 Inadimplência Global (período)", f"{percent_global:.2f}%", delta="Meta ≤3%" if percent_global<=3 else "Acima da meta")
+        tone_global = "ok" if percent_global <= 3 else ("warn" if percent_global <= 6 else "danger")
+        badge_global = "Meta ≤3%" if percent_global <= 3 else "Acima da meta"
         total_ind = df_clientes_filtrado['valor_atualizado'].sum()
         df_inad_ind = df_clientes_filtrado[df_clientes_filtrado.apply(is_inadimplente, axis=1)]
         inad_ind = df_inad_ind['valor_atualizado'].sum()
@@ -1846,12 +2011,16 @@ else:
         qtd_inad = len(df_inad_ind)
         clientes_unicos_filtrado = df_clientes_filtrado['codigo_cliente'].nunique()
         total_boletos_filtrado = len(df_clientes_filtrado)
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Meu Valor Aberto", f"R$ {total_ind:,.2f}")
-        col2.metric("Minha Inadimplência", f"{percent_ind:.2f}%")
-        col3.metric("Clientes Únicos", clientes_unicos_filtrado)
-        col4.metric("Total de Boletos", total_boletos_filtrado)
+        tone_ind = "ok" if percent_ind <= 3 else ("warn" if percent_ind <= 6 else "danger")
+        kpi_ass = [
+            render_kpi_card("Inadimplência global", f"{percent_global:.2f}%", _fmt_brl(inad_global), icon="🌍", badge=badge_global, tone=tone_global),
+            render_kpi_card("Meu valor em aberto", _fmt_brl(total_ind), "No período selecionado", icon="💼", tone="default"),
+            render_kpi_card("Minha inadimplência", f"{percent_ind:.2f}%", _fmt_brl(inad_ind), icon="📉", tone=tone_ind),
+            render_kpi_card("Títulos em atraso", _fmt_int(qtd_inad), "Qtde de títulos inadimplentes", icon="⏳", tone=tone_ind),
+            render_kpi_card("Clientes únicos", _fmt_int(clientes_unicos_filtrado), "Na sua carteira (período)", icon="👥", tone="default"),
+            render_kpi_card("Total de boletos", _fmt_int(total_boletos_filtrado), "Títulos carregados no período", icon="🧾", tone="default"),
+        ]
+        st.markdown(render_kpi_grid(kpi_ass), unsafe_allow_html=True)
 
         qtd_hoje, val_hoje = get_acordos_hoje()
         if qtd_hoje > 0: st.warning(f"🔔 **Fique atento!** Você tem **{qtd_hoje}** acordo(s) programado(s) para hoje, totalizando **R$ {val_hoje:,.2f}**.")
