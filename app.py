@@ -35,6 +35,7 @@ MAX_UPLOAD_MB_DB = int(os.environ.get("MAX_UPLOAD_MB_DB", "50"))
 LOGIN_MAX_TENTATIVAS = int(os.environ.get("LOGIN_MAX_TENTATIVAS", "6"))
 LOGIN_JANELA_SEG = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
 LOGIN_COOLDOWN_SEG = int(os.environ.get("LOGIN_COOLDOWN_SECONDS", "120"))
+REAUTH_TTL_SEG = int(os.environ.get("REAUTH_TTL_SECONDS", "600"))
 
 # ---------- CONFIGURAÇÃO DA PÁGINA ----------
 st.set_page_config(page_title="Dashboard Financeiro", page_icon="💰", layout="wide")
@@ -681,6 +682,11 @@ def _require_reauth(titulo: str):
     Reautenticação simples: pede senha atual para ações críticas.
     """
     safe_key = re.sub(r"[^a-zA-Z0-9_]+", "_", (titulo or "acao")).strip("_").lower()
+    now = time.time()
+    ok_ts_key = f"reauth_ok_ts_{safe_key}"
+    last_ok = float(st.session_state.get(ok_ts_key, 0) or 0)
+    if last_ok and (now - last_ok) <= REAUTH_TTL_SEG:
+        return
     st.warning(f"Confirmação necessária: **{titulo}**")
     email = st.session_state.get("email")
     if not email:
@@ -695,6 +701,7 @@ def _require_reauth(titulo: str):
         registrar_auditoria("reauth_falha", st.session_state.get("usuario"), f"acao={titulo}")
         st.error("Senha incorreta. Operação cancelada.")
         st.stop()
+    st.session_state[ok_ts_key] = now
     registrar_auditoria("reauth_ok", st.session_state.get("usuario"), f"acao={titulo}")
 
 
