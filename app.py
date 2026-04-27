@@ -282,6 +282,39 @@ st.markdown("""
     @media (max-width: 768px){ .kpi-card{ grid-column: span 6; } .kpi-value{ font-size: 1.35rem; } }
     @media (max-width: 480px){ .kpi-card{ grid-column: span 12; } }
 
+    /* Painéis (Assistentes): cards para lista/form */
+    .panel-card{
+        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        background: linear-gradient(155deg, rgba(51, 65, 85, 0.22) 0%, rgba(15, 23, 42, 0.72) 100%);
+        box-shadow: 0 18px 40px rgba(0,0,0,0.24);
+        padding: 16px 16px 14px 16px;
+        margin: 12px 0 16px 0;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+    }
+    .panel-title{
+        margin: 0 0 10px 0;
+        font-weight: 700;
+        color: rgba(241, 245, 249, 0.95);
+        letter-spacing: -0.02em;
+        font-size: 1.05rem;
+        display:flex;
+        align-items:center;
+        gap:10px;
+    }
+    .panel-subtitle{
+        margin: 0 0 14px 0;
+        color: rgba(148, 163, 184, 0.95);
+        font-weight: 600;
+        font-size: 0.92rem;
+    }
+
+    /* Botões mais consistentes dentro de formulários */
+    .panel-card .stButton>button{
+        width: 100% !important;
+    }
+
     /* Login — bloco visual (campos ficam abaixo; Streamlit não aninha widgets no HTML) */
     .login-hero-card {
         width: 100%; max-width: 420px; margin: 0 auto 1.5rem; padding: 2rem 1.75rem;
@@ -1878,6 +1911,7 @@ else:
 
         st.subheader("📋 Lista de Clientes (ordenada por maior atraso)")
         if not df_filtrado.empty:
+            st.markdown('<div class="panel-card"><div class="panel-title">📌 Seleção e títulos</div><div class="panel-subtitle">Escolha um cliente, selecione títulos e aplique a tratativa em lote.</div>', unsafe_allow_html=True)
             df_ordenado = df_filtrado.sort_values('tempo_atraso', ascending=False)
             codigos = df_ordenado['codigo_cliente'].unique().tolist()
             if 'cliente_selecionado' in st.session_state and st.session_state.cliente_selecionado in codigos:
@@ -1911,6 +1945,7 @@ else:
                         ids_validos = [tid for tid in ids_selecionados if titulos_df[titulos_df['id']==tid]['status_tratativa'].iloc[0] != 'acordo_finalizado']
                         if len(ids_validos) < len(ids_selecionados): st.warning("Títulos 'Acordo Finalizado' ignorados.")
                         if ids_validos:
+                            st.markdown('<div class="panel-card"><div class="panel-title">⚡ Tratativa em lote</div><div class="panel-subtitle">Atualize status, motivo e observações para os títulos selecionados.</div>', unsafe_allow_html=True)
                             with st.form("form_tratativa_lote"):
                                 novo_status = st.selectbox("Novo Status", options=list(STATUS_MAP.keys()), format_func=lambda x: STATUS_MAP[x])
                                 motivo = st.selectbox("Motivo (opcional)", ['','Vencimento fim de semana','Repasse de verba','Problemas financeiros','Erro de programação','Mudança de Pessoal','Contato não atende!'])
@@ -1933,6 +1968,7 @@ else:
                                         atualizar_status_cliente(tid, novo_status, obs_completa, st.session_state.usuario, data_str, valor_acordo, data_real_str)
                                     st.success(f"{len(ids_validos)} título(s) atualizado(s)!")
                                     st.rerun()
+                            st.markdown("</div>", unsafe_allow_html=True)
 
                     with st.expander("🔎 Ver/Editar título específico"):
                         titulo_det = st.selectbox("Número do título:", titulos_df['numero_titulo'].tolist())
@@ -1997,6 +2033,7 @@ else:
                                                 st.error("Erro ao enviar solicitação.")
                                         else:
                                             st.error("Descreva o motivo.")
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("Nenhum cliente com este status.")
 
