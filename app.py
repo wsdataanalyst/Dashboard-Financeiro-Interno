@@ -541,6 +541,17 @@ def criar_usuarios_iniciais():
         # Não cria usuários sem configuração explícita.
         return
 
+    def _truthy(v) -> bool:
+        return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    # Quando habilitado, sincroniza (atualiza) usuários já existentes com nome/perfil/senha do Secrets.
+    # Útil no Streamlit Cloud para "reset" controlado de credenciais.
+    sync_existing = False
+    try:
+        sync_existing = _truthy(st.secrets.get("BOOTSTRAP_SYNC_EXISTING", False))
+    except Exception:
+        sync_existing = False
+
     with get_connection() as conn:
         for u in usuarios:
             try:
@@ -555,10 +566,16 @@ def criar_usuarios_iniciais():
             if perfil not in PERFIS_LABEL:
                 continue
             cur = conn.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
-            if cur.fetchone() is None:
+            row = cur.fetchone()
+            if row is None:
                 conn.execute(
                     "INSERT INTO usuarios (nome, email, senha_hash, perfil, ultima_troca_senha) VALUES (?, ?, ?, ?, ?)",
                     (nome, email, hash_password(senha), perfil, hoje),
+                )
+            elif sync_existing:
+                conn.execute(
+                    "UPDATE usuarios SET nome = ?, perfil = ?, senha_hash = ?, ultima_troca_senha = ? WHERE email = ?",
+                    (nome, perfil, hash_password(senha), hoje, email),
                 )
         conn.commit()
 
