@@ -327,19 +327,16 @@ def render_kpi_card(label: str, value: str, subtitle: str = "", icon: str = "�
     if badge_html:
         badge_block = f'<div class="kpi-badge"><span class="kpi-badge-dot"></span><span>{badge_html}</span></div>'
     sub_block = f'<p class="kpi-sub">{subtitle_html}</p>' if subtitle_html else ""
-    return f"""
-      <div class="kpi-card" data-tone="{tone}">
-        <div class="kpi-top">
-          <div>
-            <p class="kpi-label">{label_html}</p>
-            <p class="kpi-value">{value_html}</p>
-            {sub_block}
-            {badge_block}
-          </div>
-          <div class="kpi-icon">{icon_html}</div>
-        </div>
-      </div>
-    """
+    # Não use indentação inicial: o Markdown pode interpretar como code-block.
+    return (
+        f'<div class="kpi-card" data-tone="{tone}">'
+        f'<div class="kpi-top"><div>'
+        f'<p class="kpi-label">{label_html}</p>'
+        f'<p class="kpi-value">{value_html}</p>'
+        f'{sub_block}'
+        f'{badge_block}'
+        f'</div><div class="kpi-icon">{icon_html}</div></div></div>'
+    )
 
 
 def render_kpi_grid(cards_html: list[str]) -> str:
