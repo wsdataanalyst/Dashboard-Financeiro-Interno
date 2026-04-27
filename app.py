@@ -409,17 +409,29 @@ STATUS_CARD_THEMES = {
 
 
 def render_status_card(status_key, qtd, valor):
-    bg, val_color = STATUS_CARD_THEMES[status_key]
-    label = STATUS_MAP[status_key]
-    valor_str = f"R$ {valor:,.2f}"
-    return f"""
-    <div style="background:{bg};padding:16px 12px;border-radius:16px;text-align:center;margin-bottom:8px;
-                border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 28px rgba(0,0,0,0.22);">
-        <h4 style="color:rgba(255,255,255,0.93);margin:0;font-size:0.86rem;font-weight:600;line-height:1.25">{label}</h4>
-        <h2 style="color:#fff;margin:8px 0;font-size:1.55rem;font-weight:700">{qtd}</h2>
-        <p style="color:{val_color};margin:0;font-size:0.92rem;font-weight:600">{valor_str}</p>
-    </div>
     """
+    Card de status (Assistentes): mantém as cores/gradientes por status,
+    porém com layout moderno e consistente com os KPI cards.
+    """
+    bg, val_color = STATUS_CARD_THEMES[status_key]
+    label = STATUS_MAP.get(status_key, status_key)
+    valor_str = _fmt_brl(valor)
+    qtd_str = _fmt_int(qtd)
+
+    label_html = (label or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    valor_html = (valor_str or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    qtd_html = (qtd_str or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    val_color_html = (val_color or "#e2e8f0").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Sem indentação inicial para não virar code-block no markdown
+    return (
+        f'<div class="kpi-card" data-tone="default" style="background:{bg};border:1px solid rgba(255,255,255,0.12);box-shadow:0 18px 40px rgba(0,0,0,0.28);min-height:108px;">'
+        f'<div class="kpi-top"><div>'
+        f'<p class="kpi-label" style="color:rgba(255,255,255,0.86)">{label_html}</p>'
+        f'<p class="kpi-value" style="font-size:1.7rem">{qtd_html}</p>'
+        f'<p class="kpi-sub" style="color:{val_color_html};font-weight:700">{valor_html}</p>'
+        f'</div><div class="kpi-icon" style="background:rgba(0,0,0,0.18);border-color:rgba(255,255,255,0.18)">🏷️</div></div></div>'
+    )
 
 
 def aplicar_tema_plotly(fig, altura=None):
