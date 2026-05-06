@@ -657,6 +657,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS historico_tratativas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cliente_id INTEGER REFERENCES clientes(id),
+                codigo_cliente TEXT,
+                numero_titulo TEXT,
                 assistente TEXT,
                 acao TEXT,
                 status_anterior TEXT,
@@ -665,6 +667,35 @@ def init_db():
                 data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Migração (bases antigas): adiciona colunas quando a tabela já existia sem elas
+        try:
+            cur_h = conn.execute("PRAGMA table_info(historico_tratativas)")
+            cols_h = [row[1] for row in cur_h.fetchall()]
+            if "codigo_cliente" not in cols_h:
+                conn.execute("ALTER TABLE historico_tratativas ADD COLUMN codigo_cliente TEXT")
+            if "numero_titulo" not in cols_h:
+                conn.execute("ALTER TABLE historico_tratativas ADD COLUMN numero_titulo TEXT")
+        except Exception:
+            pass
+
+        # Guarda tratativas "manuais" de forma estável (sobrevive a novos uploads/substituição)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tratativas_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo_cliente TEXT NOT NULL,
+                numero_titulo TEXT NOT NULL,
+                assistente_responsavel TEXT,
+                status_tratativa TEXT,
+                observacao TEXT,
+                data_pagamento_programado TEXT,
+                data_pagamento_realizado TEXT,
+                valor_acordo REAL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(codigo_cliente, numero_titulo)
+            )
+            """
+        )
         conn.execute('''
             CREATE TABLE IF NOT EXISTS solicitacoes_reabertura (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -706,6 +737,109 @@ def init_db():
             ("Edvanisson Muniz", "edvanison@empresa.com"),
         )
         conn.commit()
+
+
+def _upsert_tratativa_override(
+    conn,
+    codigo_cliente: str,
+    numero_titulo: str,
+    *,
+    assistente_responsavel=None,
+    status_tratativa=None,
+    observacao=None,
+    data_pagamento_programado=None,
+    data_pagamento_realizado=None,
+    valor_acordo=None,
+):
+    """
+    Persiste ajustes manuais por (codigo_cliente, numero_titulo) para sobreviver a novos uploads.
+    """
+    codigo_cliente = (codigo_cliente or "").strip()
+    numero_titulo = (numero_titulo or "").strip()
+    if not (codigo_cliente and numero_titulo):
+        return
+    conn.execute(
+        """
+        INSERT INTO tratativas_overrides (
+            codigo_cliente, numero_titulo,
+            assistente_responsavel, status_tratativa, observacao,
+            data_pagamento_programado, data_pagamento_realizado, valor_acordo,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(codigo_cliente, numero_titulo) DO UPDATE SET
+            assistente_responsavel = COALESCE(excluded.assistente_responsavel, assistente_responsavel),
+            status_tratativa = COALESCE(excluded.status_tratativa, status_tratativa),
+            observacao = COALESCE(excluded.observacao, observacao),
+            data_pagamento_programado = COALESCE(excluded.data_pagamento_programado, data_pagamento_programado),
+            data_pagamento_realizado = COALESCE(excluded.data_pagamento_realizado, data_pagamento_realizado),
+            valor_acordo = COALESCE(excluded.valor_acordo, valor_acordo),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            codigo_cliente,
+            numero_titulo,
+            assistente_responsavel,
+            status_tratativa,
+            observacao,
+            data_pagamento_programado,
+            data_pagamento_realizado,
+            valor_acordo,
+        ),
+    )
+
+
+def _aplicar_overrides_em_clientes(conn):
+    """
+    Reaplica ajustes manuais após upload/substituição, mantendo o "histórico" do time.
+    """
+    conn.execute(
+        """
+        UPDATE clientes
+        SET
+            assistente_responsavel = COALESCE(
+                (SELECT o.assistente_responsavel
+                 FROM tratativas_overrides o
+                 WHERE o.codigo_cliente = clientes.codigo_cliente
+                   AND o.numero_titulo = clientes.numero_titulo),
+                assistente_responsavel
+            ),
+            status_tratativa = COALESCE(
+                (SELECT o.status_tratativa
+                 FROM tratativas_overrides o
+                 WHERE o.codigo_cliente = clientes.codigo_cliente
+                   AND o.numero_titulo = clientes.numero_titulo),
+                status_tratativa
+            ),
+            observacao = COALESCE(
+                (SELECT o.observacao
+                 FROM tratativas_overrides o
+                 WHERE o.codigo_cliente = clientes.codigo_cliente
+                   AND o.numero_titulo = clientes.numero_titulo),
+                observacao
+            ),
+            data_pagamento_programado = COALESCE(
+                (SELECT o.data_pagamento_programado
+                 FROM tratativas_overrides o
+                 WHERE o.codigo_cliente = clientes.codigo_cliente
+                   AND o.numero_titulo = clientes.numero_titulo),
+                data_pagamento_programado
+            ),
+            data_pagamento_realizado = COALESCE(
+                (SELECT o.data_pagamento_realizado
+                 FROM tratativas_overrides o
+                 WHERE o.codigo_cliente = clientes.codigo_cliente
+                   AND o.numero_titulo = clientes.numero_titulo),
+                data_pagamento_realizado
+            ),
+            valor_acordo = COALESCE(
+                (SELECT o.valor_acordo
+                 FROM tratativas_overrides o
+                 WHERE o.codigo_cliente = clientes.codigo_cliente
+                   AND o.numero_titulo = clientes.numero_titulo),
+                valor_acordo
+            )
+        """
+    )
 
 
 def criar_usuarios_iniciais():
@@ -1084,8 +1218,23 @@ def processar_upload_excel(arquivo, modo="atualizar"):
             if not email_adm or not verificar_senha_usuario(email_adm, senha_admin):
                 st.error("Senha incorreta. Operação cancelada.")
                 return None
+            # Backfill do histórico antigo para sobreviver à substituição:
+            # se existirem linhas antigas com apenas cliente_id, preenche codigo/titulo a partir da base atual.
+            try:
+                conn.execute(
+                    """
+                    UPDATE historico_tratativas
+                    SET
+                        codigo_cliente = (SELECT c.codigo_cliente FROM clientes c WHERE c.id = historico_tratativas.cliente_id),
+                        numero_titulo = (SELECT c.numero_titulo FROM clientes c WHERE c.id = historico_tratativas.cliente_id)
+                    WHERE (codigo_cliente IS NULL OR codigo_cliente = '' OR numero_titulo IS NULL OR numero_titulo = '')
+                      AND cliente_id IS NOT NULL
+                    """
+                )
+                conn.commit()
+            except Exception:
+                pass
             conn.execute("DELETE FROM clientes")
-            conn.execute("DELETE FROM historico_tratativas")
             conn.execute("DELETE FROM solicitacoes_reabertura")
             conn.commit()
             registrar_auditoria("upload_substituir_total", st.session_state.get("usuario"), f"registros_planilha={len(df)}")
@@ -1146,6 +1295,12 @@ def processar_upload_excel(arquivo, modo="atualizar"):
                 conn.commit()
                 progress.progress((i+1)/total)
         conn.commit()
+        # Reaplica tratativas manuais para garantir que não sejam perdidas em novos uploads.
+        try:
+            _aplicar_overrides_em_clientes(conn)
+            conn.commit()
+        except Exception:
+            pass
         progress.empty()
         st.success(f"Upload concluído! {total} registros processados.")
         if modo == "atualizar":
@@ -1156,10 +1311,13 @@ def processar_upload_excel(arquivo, modo="atualizar"):
 def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, data_pagamento=None, valor_acordo=None, data_pagamento_realizado=None):
     try:
         with get_connection() as conn:
-            cur = conn.execute("SELECT status_tratativa FROM clientes WHERE id = ?", (cliente_id,))
+            cur = conn.execute(
+                "SELECT codigo_cliente, numero_titulo, status_tratativa FROM clientes WHERE id = ?",
+                (cliente_id,),
+            )
             row = cur.fetchone()
             if not row: return False
-            status_anterior = row[0]
+            codigo_cliente, numero_titulo, status_anterior = row
             set_parts = ["status_tratativa = ?", "observacao = ?", "data_ultima_atualizacao = CURRENT_TIMESTAMP"]
             params = [novo_status, observacao]
             if data_pagamento:
@@ -1174,9 +1332,24 @@ def atualizar_status_cliente(cliente_id, novo_status, observacao, assistente, da
             params.append(cliente_id)
             conn.execute(f"UPDATE clientes SET {', '.join(set_parts)} WHERE id = ?", params)
             conn.execute('''
-                INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
-                VALUES (?, ?, 'atualizacao_status', ?, ?, ?)
-            ''', (cliente_id, assistente, status_anterior, novo_status, observacao))
+                INSERT INTO historico_tratativas (
+                    cliente_id, codigo_cliente, numero_titulo,
+                    assistente, acao, status_anterior, status_novo, observacao
+                )
+                VALUES (?, ?, ?, ?, 'atualizacao_status', ?, ?, ?)
+            ''', (cliente_id, codigo_cliente, numero_titulo, assistente, status_anterior, novo_status, observacao))
+            # Persiste a tratativa para sobreviver a novos uploads/substituição
+            _upsert_tratativa_override(
+                conn,
+                codigo_cliente,
+                numero_titulo,
+                assistente_responsavel=None,
+                status_tratativa=novo_status,
+                observacao=observacao,
+                data_pagamento_programado=data_pagamento,
+                data_pagamento_realizado=data_pagamento_realizado,
+                valor_acordo=valor_acordo,
+            )
             conn.commit()
         st.cache_data.clear()
         return True
@@ -1396,16 +1569,58 @@ def processar_solicitacao(solicitacao_id, aprovado, admin_nome):
             row = cur.fetchone()
             if row:
                 cliente_id = row[0]
+                try:
+                    meta = conn.execute(
+                        "SELECT codigo_cliente, numero_titulo, status_tratativa FROM clientes WHERE id = ?",
+                        (cliente_id,),
+                    ).fetchone()
+                except Exception:
+                    meta = None
+                codigo_cliente = meta[0] if meta else None
+                numero_titulo = meta[1] if meta else None
+                status_anterior = meta[2] if meta else "acordo_finalizado"
                 conn.execute("UPDATE clientes SET status_tratativa = 'em_tratativa', data_ultima_atualizacao = CURRENT_TIMESTAMP WHERE id = ?", (cliente_id,))
                 conn.execute('''
-                    INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
-                    VALUES (?, 'Sistema', 'reabertura_aprovada', 'acordo_finalizado', 'em_tratativa', ?)
-                ''', (cliente_id, f"Reabertura aprovada por {admin_nome}"))
+                    INSERT INTO historico_tratativas (
+                        cliente_id, codigo_cliente, numero_titulo,
+                        assistente, acao, status_anterior, status_novo, observacao
+                    )
+                    VALUES (?, ?, ?, 'Sistema', 'reabertura_aprovada', ?, 'em_tratativa', ?)
+                ''', (cliente_id, codigo_cliente, numero_titulo, status_anterior, f"Reabertura aprovada por {admin_nome}"))
+                # Persiste a reabertura (tratativa) para sobreviver a novos uploads/substituição
+                _upsert_tratativa_override(
+                    conn,
+                    codigo_cliente,
+                    numero_titulo,
+                    status_tratativa="em_tratativa",
+                )
         conn.commit()
     st.cache_data.clear()
 
 def carregar_historico_titulo(cliente_id):
     with get_connection() as conn:
+        # Preferência: histórico por (codigo_cliente, numero_titulo), que sobrevive a substituição de base.
+        try:
+            row = conn.execute(
+                "SELECT codigo_cliente, numero_titulo FROM clientes WHERE id = ?",
+                (int(cliente_id),),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row and row[0] and row[1]:
+            codigo_cliente, numero_titulo = row
+            return pd.read_sql_query(
+                """
+                SELECT datetime(data_hora, 'localtime') AS data_hora, assistente, acao,
+                       status_anterior, status_novo, observacao
+                FROM historico_tratativas
+                WHERE codigo_cliente = ? AND numero_titulo = ?
+                ORDER BY data_hora DESC
+                LIMIT 200
+                """,
+                conn,
+                params=(str(codigo_cliente).strip(), str(numero_titulo).strip()),
+            )
         return pd.read_sql_query(
             """
             SELECT datetime(data_hora, 'localtime') AS data_hora, assistente, acao,
@@ -1445,14 +1660,39 @@ def transferir_cliente(codigo_cliente, nova_assistente, executado_por=None):
             "UPDATE clientes SET assistente_responsavel = ?, data_ultima_atualizacao = CURRENT_TIMESTAMP WHERE codigo_cliente = ?",
             (nova_assistente, codigo_cliente.strip()),
         )
+        # Persiste transferência para sobreviver a novos uploads/substituição
+        try:
+            titulos = conn.execute(
+                "SELECT numero_titulo FROM clientes WHERE codigo_cliente = ?",
+                (codigo_cliente.strip(),),
+            ).fetchall()
+            for (numero_titulo,) in titulos:
+                _upsert_tratativa_override(
+                    conn,
+                    codigo_cliente.strip(),
+                    str(numero_titulo).strip(),
+                    assistente_responsavel=nova_assistente,
+                )
+        except Exception:
+            pass
         quem = executado_por or "Supervisor"
         for cliente_id, assist_ant, status_atual in rows:
             conn.execute(
                 """
-                INSERT INTO historico_tratativas (cliente_id, assistente, acao, status_anterior, status_novo, observacao)
-                VALUES (?, ?, 'transferencia_assistente', ?, ?, ?)
+                INSERT INTO historico_tratativas (
+                    cliente_id, codigo_cliente, numero_titulo,
+                    assistente, acao, status_anterior, status_novo, observacao
+                )
+                VALUES (
+                    ?,
+                    (SELECT codigo_cliente FROM clientes WHERE id = ?),
+                    (SELECT numero_titulo FROM clientes WHERE id = ?),
+                    ?, 'transferencia_assistente', ?, ?, ?
+                )
                 """,
                 (
+                    cliente_id,
+                    cliente_id,
                     cliente_id,
                     quem,
                     status_atual,
